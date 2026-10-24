@@ -1,0 +1,9 @@
+/sanholo-cloud
+/bin/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+credentials.json
+/.claude/worktrees/
