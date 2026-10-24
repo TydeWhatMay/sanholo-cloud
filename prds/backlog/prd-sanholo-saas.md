@@ -839,8 +839,11 @@ Answered 2026-10-24: subdomains per customer (D10), domain `sanholo.space`
   backup/restore runbook and snapshot API, and the integration contract.
   US-002, US-003 (live login), US-014 and US-022 (qm restore drill) depend
   on these; the client side of US-003 can be built now against a fake qm.
-- OQ-4: `sanholo.space` registered (2026-10-24). Still open: a DNS
-  provider with an API for DNS-01 wildcard certificates.
+- OQ-4 ANSWERED 2026-10-24: `sanholo.space` is registered at OVH. The
+  TydeWhatMay/infra session holds a scoped OVH DNS token and owns DNS,
+  Traefik and the Nomad platform side on **nomad-prod** (DNS-01 wildcard
+  for `*.sanholo.space`, `app.sanholo.space`, AhaSend SPF/DKIM records;
+  no inbound email). The operator confirms before it is set up.
 - OQ-11 ANSWERED 2026-10-24: GitHub Container Registry under the
   TydeWhatMay org, image `ghcr.io/tydewhatmay/sanholo:X.Y.Z`. Both SanHolo
   repositories moved to the TydeWhatMay org on 2026-10-24
