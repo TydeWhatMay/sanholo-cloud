@@ -12,10 +12,14 @@ requirement or open point the control plane must cover.
 - CSRF: the instance sets `__Host-sanholo_csrf` and wants `X-CSRF-Token` on
   every state-changing request; the proxy must pass both through unchanged.
 - Alerts from the instance arrive at `-hosted-alert-url` as JSON
-  `{kind, severity, text, key, at, link}` with header `X-SanHolo-Tenant`. The
-  header is only a claim (the instance has no signing key): the control plane
-  must check it against the network path the request came from (per-tenant
-  network identity) before trusting it.
+  `{kind, severity, text, key, at, link}` with `Authorization: Bearer <jwt>`,
+  the job's second Nomad workload identity (audience `sanholo.cloud`). The
+  control plane verifies it against Nomad's JWKS and takes the tenant from the
+  verified job id `sanholo-tenant-<id>`; `X-SanHolo-Tenant` is informational
+  only. The tenant job spec needs a second `identity` block:
+  `aud = ["sanholo.cloud"]`, `file = true`, name `sanholo.cloud`.
+- Nomad `kill_timeout` must be raised from the default 5 s to 20 s: the
+  instance drains its engine and closes cleanly within that.
 - Push subscriptions: the Bridge POSTs the browser's subscription to
   `/push/subscribe` on its own origin; the proxy must intercept that path (the
   instance answers 404 for it). VAPID public key goes to the instance as

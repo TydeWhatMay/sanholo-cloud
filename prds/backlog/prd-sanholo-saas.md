@@ -299,6 +299,11 @@ released client.
 - [ ] A `Dockerfile` (multi-stage: Go build, then a distroless/static
   runtime, non-root user, no shell) builds `san-holo` with the release's
   version stamped in.
+- [ ] Image tags equal the release tag (`ghcr.io/tydewhatmay/sanholo:vX.Y.Z`);
+  every `sanholo:X.Y.Z` / `sanholo:<version>` in this PRD means that tag.
+  Binary publishing waits for the image job: a release whose image failed
+  is not published, so the updater never sees a version it cannot deploy
+  (decision 2026-10-24).
 - [ ] The release workflow builds linux/amd64 and linux/arm64 and pushes
   `ghcr.io/tydewhatmay/sanholo:X.Y.Z` plus its digest (OQ-11); the
   release notes list the digest.
@@ -536,8 +541,13 @@ have to keep the Bridge open.
 - [ ] "Enable notifications" stores the browser's push subscription in the
   control plane (not the instance), tied to the tenant.
 - [ ] The instance posts alerts to the control plane's
-  `POST /internal/alerts` (identity-signed, tenant-bound); the control plane
-  sends Web Push with TydeWhatMay's VAPID keys. Alert payloads carry kind,
+  `POST /internal/alerts`, authenticated with a **second Nomad workload
+  identity** (audience `sanholo.cloud`, written by Nomad to
+  `${NOMAD_SECRETS_DIR}/nomad_sanholo.cloud.jwt`) sent as
+  `Authorization: Bearer <jwt>`; the control plane verifies it against
+  Nomad's JWKS and derives the tenant from the verified job id
+  (`sanholo-tenant-<id>`), never from a header alone (review 2026-10-24,
+  M1). The control plane sends Web Push with TydeWhatMay's VAPID keys. Alert payloads carry kind,
   short text and a deep link, never coordinates of other players or
   tokens.
 - [ ] Per-tenant send cap: 30 pushes/hour; over it, one "more alerts are
