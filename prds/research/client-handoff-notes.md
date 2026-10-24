@@ -32,8 +32,11 @@ requirement or open point the control plane must cover.
 - Alert text is cut to 280 characters and scrubbed of the game token, but
   other players' coordinates in game text are not removed: decide whether the
   push body should be reduced further.
-- `/healthz` answers `503 starting` until the first poll on a fresh instance:
-  give the Nomad check a grace period (startup itself is about 1 s).
+- `/healthz` answers 200 `starting` for up to 10 minutes while the instance
+  warms up, then 503 `warm-up stuck`; after warm-up, 503 `bot stalled` or
+  `poller stalled` when either is over 2 minutes old. Set the Nomad check's
+  grace / `check_restart` so a restart only follows a sustained 503 (startup
+  itself is about 1 s; warm-up can take minutes under the game's rate limit).
 - Credentials: tenant from `NOMAD_JOB_ID` = `sanholo-tenant-<id>`; identity
   file `${NOMAD_SECRETS_DIR}/nomad_qm.sanholo.jwt`; qm wire shapes live in the
   client's `internal/qmcreds/wire.go` until qm's integration contract lands.
