@@ -838,12 +838,12 @@ Answered 2026-10-24: subdomains per customer (D10), domain `sanholo.space`
 - OQ-4: `sanholo.space` registered (2026-10-24). Still open: a DNS
   provider with an API for DNS-01 wildcard certificates.
 - OQ-11 ANSWERED 2026-10-24: GitHub Container Registry under the
-  TydeWhatMay org, image `ghcr.io/tydewhatmay/sanholo:X.Y.Z`. The release
-  workflow runs in `lhaig/san-holo`, whose own `GITHUB_TOKEN` can only push
-  under `lhaig`, so it pushes with a TydeWhatMay credential that has
-  `packages: write` (a GitHub App installation token or fine-grained token
-  for the org, stored as a repository secret; operator creates it). The
-  package is created by the first push. Visibility: public, like the
+  TydeWhatMay org, image `ghcr.io/tydewhatmay/sanholo:X.Y.Z`. Both SanHolo
+  repositories moved to the TydeWhatMay org on 2026-10-24
+  (`TydeWhatMay/san-holo`, public binaries `TydeWhatMay/SanHolo`), so the
+  release workflow pushes with its own `GITHUB_TOKEN`
+  (`permissions: packages: write`); no extra secret. The package is
+  created by the first push. Visibility: public, like the
   binaries, so Nomad pulls without registry credentials (operator to
   confirm after the first push).
 - OQ-8 (later, billing): plans per customer per month through an EU

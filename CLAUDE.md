@@ -5,7 +5,7 @@ Guidance for Claude Code in this repository. Read this first, then
 
 ## What this is
 
-The hosted service around the SanHolo client (`lhaig/san-holo`). It owns:
+The hosted service around the SanHolo client (`TydeWhatMay/san-holo`). It owns:
 
 - the control plane (`cmd/sanholo-cloud`): waitlist and invites, magic-link
   and passkey sign-in, the account pages on `app.sanholo.space`, game-account
@@ -18,7 +18,7 @@ The hosted service around the SanHolo client (`lhaig/san-holo`). It owns:
   then batches) and reverts on failed health;
 - infrastructure (`deploy/`): Nomad jobs, edge, backups.
 
-The client stays in `lhaig/san-holo`; its hosted-mode work (Phase 86 there)
+The client stays in `TydeWhatMay/san-holo`; its hosted-mode work (Phase 86 there)
 sits behind `-hosted`. This repository consumes the client only as a released
 container image.
 
