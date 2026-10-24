@@ -159,15 +159,17 @@ blocked on qm, not on SanHolo.
   policies]**. No per-customer policies or roles exist (count check).
 - [ ] The sign-up service's principal has create/update on
   `secret/data/sanholo/tenants/*`, list on
-  `secret/metadata/sanholo/tenants/*`, delete on `secret/data/...` and
-  `secret/destroy/...`, and **no read** (available today). Verified by a
+  `secret/metadata/sanholo/tenants/*`, delete on `secret/data/...`, delete
+  plus sudo on `secret/destroy/...` (qm main requires sudo to destroy a
+  version), and **no read** (available today). Verified by a
   read with that principal returning 403. It holds no policy or role
   authority.
 - [ ] The control plane's Postgres credentials come from `qm db creds`
   (available today), using an AppRole of its own (separate from the
   write-only sign-up principal; separate principals, least privilege).
-- [ ] Platform alerting reads the `sealed` field of `GET /qm/v1/sys/health`
-  (it returns 200 even when sealed today) until qm's non-200 status lands.
+- [ ] Platform health checks and alerting use `GET /qm/v1/sys/ready`
+  (no auth; 503 when qm is sealed, uninitialised or not yet operational,
+  200 otherwise). `sys/health` stays a liveness probe (always 200).
 - [ ] The development qm on this machine holds no SanHolo Hosted secrets.
 
 ### US-001b: Fresh-player soak test
@@ -475,9 +477,11 @@ instance, so that a bug in another tenant's instance cannot read it.
 
 **Acceptance Criteria:**
 - [ ] Each tenant job declares an `identity` block with audience
-  `qm.sanholo` and `file = true`; tenant ids are generated as
-  `[a-z0-9]` plus hyphens only (never `/`, `.`, `*` or anything qm could
-  read as path syntax), checked by a regex test on the generator.
+  `qm.sanholo` and `file = true`; tenant ids follow qm's rule: 1 to 63
+  characters, lowercase letters, digits and hyphens, starting and ending
+  with a letter or digit (`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`; never
+  `/`, `.`, `*` or anything qm could read as path syntax), checked by a
+  regex test on the generator and enforced by the client (US-003).
 - [ ] Integration test against a staging qm: tenant A's identity reading
   `secret/data/sanholo/tenants/<B>/game` gets 403; reading its own gets
   200.

@@ -57,8 +57,10 @@ go run ./cmd/sanholo-cloud -addr 127.0.0.1:8090
   `secret/data/sanholo/tenants/<id>/game`. The sign-up service writes, lists
   and destroys; it never reads. Tokens are never stored in PostgreSQL, never
   logged, never shown back after entry.
-- Tenant ids: lowercase letters, digits and hyphens only (they become part
+- Tenant ids follow qm's rule: 1 to 63 characters, lowercase letters, digits
+  and hyphens, starting and ending with a letter or digit (they become part
   of the job id and the qm path).
+- qm health: check `GET /qm/v1/sys/ready` (503 when sealed or not ready).
 - Every deletion and token rotation goes through one code path
   (`secrets.PurgeTenant` / `secrets.Rotate`) so qm's tenant purge can replace
   its internals later.
