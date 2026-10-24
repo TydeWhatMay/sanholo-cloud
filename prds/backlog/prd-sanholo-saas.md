@@ -107,7 +107,7 @@ DNS-01.
 
 Repositories (D14): `sanholo-cloud` holds the control plane, the tenant
 job template, the updater and the infrastructure code; it consumes the
-client as a released container image (`sanholo:X.Y.Z`, built by this
+client as a released container image (`ghcr.io/tydewhatmay/sanholo:X.Y.Z`, built by this
 repository's release workflow, new step). Stories are tagged **[client]**
 (this repository) or **[cloud]** (`sanholo-cloud`) in section 10.
 
@@ -298,7 +298,7 @@ released client.
   runtime, non-root user, no shell) builds `san-holo` with the release's
   version stamped in.
 - [ ] The release workflow builds linux/amd64 and linux/arm64 and pushes
-  `sanholo:X.Y.Z` plus its digest to the registry named in OQ-11; the
+  `ghcr.io/tydewhatmay/sanholo:X.Y.Z` plus its digest (OQ-11); the
   release notes list the digest.
 - [ ] The image contains no credentials file, no catalog and no docs
   mirror (test: `docker run --entrypoint` is impossible without a shell;
@@ -443,7 +443,7 @@ on failure and stop when asked.
   token, the customer's Bridge link answers (polls `/v1/job/<id>/allocations`
   until healthy, shows progress on the onboarding page).
 - [ ] Connecting the game account renders job `sanholo-tenant-<tenant>`
-  with one task: the pinned image `sanholo:<version>` started with
+  with one task: the pinned image `ghcr.io/tydewhatmay/sanholo:<version>` started with
   `-hosted -live -credentials-source qm`, a per-tenant host volume for the
   catalog, memory 384 MB hard limit (room for two replicants), CPU 300 MHz,
   restart policy 3 attempts / 10 min then fail.
@@ -606,7 +606,7 @@ instances when I publish a new SanHolo version, in stages, so that I never
 redeploy tenants by hand and a bad release hurts few customers.
 
 **Acceptance Criteria:**
-- [ ] Publishing a release (a `vX.Y.Z` tag builds image `sanholo:X.Y.Z`)
+- [ ] Publishing a release (a `vX.Y.Z` tag builds image `ghcr.io/tydewhatmay/sanholo:X.Y.Z`)
   records the version in the control plane's `releases` table; nothing
   rolls until the operator marks it `rollout`.
 - [ ] The **updater** is a Nomad periodic/batch job (or a control-plane
@@ -837,12 +837,15 @@ Answered 2026-10-24: subdomains per customer (D10), domain `sanholo.space`
   on these; the client side of US-003 can be built now against a fake qm.
 - OQ-4: `sanholo.space` registered (2026-10-24). Still open: a DNS
   provider with an API for DNS-01 wildcard certificates.
-- OQ-11 ANSWERED 2026-10-24: GitHub Container Registry under lhaig,
-  image `ghcr.io/lhaig/sanholo:X.Y.Z`. The release workflow pushes with
-  its own `GITHUB_TOKEN` (`permissions: packages: write`); the package is
-  created by the first push. Visibility: public, like the binaries, so
-  Nomad pulls without registry credentials (operator to confirm after the
-  first push).
+- OQ-11 ANSWERED 2026-10-24: GitHub Container Registry under the
+  TydeWhatMay org, image `ghcr.io/tydewhatmay/sanholo:X.Y.Z`. The release
+  workflow runs in `lhaig/san-holo`, whose own `GITHUB_TOKEN` can only push
+  under `lhaig`, so it pushes with a TydeWhatMay credential that has
+  `packages: write` (a GitHub App installation token or fine-grained token
+  for the org, stored as a repository secret; operator creates it). The
+  package is created by the first push. Visibility: public, like the
+  binaries, so Nomad pulls without registry credentials (operator to
+  confirm after the first push).
 - OQ-8 (later, billing): plans per customer per month through an EU
   merchant of record (Vatly) with Mollie, VAT handled by the merchant of
   record. Price levels follow the cost measured in the beta.
@@ -868,4 +871,4 @@ US-029 and the
 Bridge side of US-016 (manifest, service worker, alert post). **[cloud]**
 US-002, US-009 to US-015, the delivery side of US-016, US-017 to US-025.
 New in this repository: a release step that builds and pushes the
-`sanholo:X.Y.Z` container image the cloud repository deploys.
+`ghcr.io/tydewhatmay/sanholo:X.Y.Z` container image the cloud repository deploys.
