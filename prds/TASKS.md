@@ -18,9 +18,10 @@ External dependencies, and how each phase copes with them:
 | # | Task | PRD | Status | Notes |
 |---|------|-----|--------|-------|
 | 1.1 | Storage foundation: config from env, PostgreSQL via pgx, embedded migrations, `tenant_id` convention, schema-derived "tables with tenant_id" helper (for US-018), test Postgres via a throwaway Docker container (`scripts/test-db.sh`), gate script. | [prd](backlog/prd-sanholo-saas.md) | DONE | first |
-| 1.2 | US-009 waitlist, single-use invites (14 days, bound to email), `beta.invite_only`, hard tenant cap. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 1.1 |
-| 1.3 | US-010 sign-in: magic link (15 min, single use, no enumeration, no existence-dependent work), server-side sessions (host-only cookie on app.), rate limits keyed correctly behind the edge, AhaSend client (fake in tests), passkeys (WebAuthn). | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 1.1 |
-| 1.4 | US-020 admin skeleton: operator accounts with passkey required, tenant list, audit table for every admin action; no path to a token. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 1.3 |
+| 1.2 | US-009 waitlist, single-use invites (14 days, bound to email), `beta.invite_only`, hard tenant cap. | [prd](backlog/prd-sanholo-saas.md) | ACTIVE | needs 1.1 |
+| 1.3 | US-010 sign-in part 1: magic link (15 min, single use, no enumeration, no existence-dependent work), server-side revocable sessions (host-only cookie on app.), rate limits keyed correctly behind the edge, AhaSend client (fake in tests). | [prd](backlog/prd-sanholo-saas.md) | ACTIVE | needs 1.1 |
+| 1.3b | US-010 sign-in part 2: passkeys (WebAuthn register, sign in, delete). | [prd](backlog/prd-sanholo-saas.md) | TODO | with 1.4 |
+| 1.4 | US-020 admin skeleton (needs 1.3b): operator accounts with passkey required, tenant list, audit table for every admin action; no path to a token. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 1.3 |
 | 1.5 | US-024 privacy notice, beta terms, imprint in the company register; CSP with no third-party scripts (test). | [prd](backlog/prd-sanholo-saas.md) | TODO | copy via the voice skill (Register 2) |
 
 ## Phase 2: Tenants — secrets, onboarding, provisioning, proxy, updater (fakes for qm and Nomad)
