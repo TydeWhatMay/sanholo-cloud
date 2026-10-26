@@ -33,7 +33,8 @@ go vet ./...
 go test ./... -count=1
 gofmt -l .        # must print nothing
 gosec -quiet ./...
-go run ./cmd/sanholo-cloud -addr 127.0.0.1:8090
+scripts/gate.sh   # full gate (needs Docker)
+DATABASE_URL=postgres://... go run ./cmd/sanholo-cloud
 ```
 
 ## Conventions
