@@ -1,0 +1,10 @@
+<h1>SanHolo</h1>
+<p>SanHolo plays Replicant Space for you and shows you what it is doing.</p>
+<p>The hosted beta is invite-only. Leave your email address to join the waiting list.</p>
+<form method="post" action="/waitlist">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="email">Email address</label>
+<p><input id="email" type="email" name="email" required maxlength="254" autocomplete="email"></p>
+<button type="submit">Join the waiting list</button>
+</form>
+<p class="muted"><a href="/signin">Sign in</a></p>

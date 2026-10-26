@@ -1,0 +1,7 @@
+<h1>Sign in to SanHolo</h1>
+<p>Press the button to finish signing in.</p>
+<form method="post" action="/signin/verify">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="token" value="{{.Token}}">
+<button type="submit">Sign in</button>
+</form>

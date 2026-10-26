@@ -1,0 +1,19 @@
+<h1>Account</h1>
+<p>Signed in as {{.Email}}.</p>
+<h2>Sessions</h2>
+<table>
+<tr><th>Device</th><th>Last used</th><th></th></tr>
+{{range .Sessions}}<tr>
+<td>{{if .UserAgent}}{{.UserAgent}}{{else}}Unknown{{end}}{{if .Current}} (this session){{end}}</td>
+<td>{{.LastSeen}}</td>
+<td><form method="post" action="/account/sessions/{{.ID}}/revoke">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button class="plain" type="submit">{{if .Current}}Sign out{{else}}Revoke{{end}}</button>
+</form></td>
+</tr>
+{{end}}
+</table>
+<form method="post" action="/signout">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><button type="submit">Sign out</button></p>
+</form>

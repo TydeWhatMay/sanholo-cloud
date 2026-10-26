@@ -20,13 +20,21 @@ type Pinger interface {
 
 // New returns the control plane's Fiber app. db may be nil, in which case
 // /readyz never reports ready.
-func New(db Pinger) *fiber.App {
-	app := fiber.New(fiber.Config{
+func New(db Pinger, opts ...Option) *fiber.App {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	cfg := fiber.Config{
 		// Values from FormValue/Params alias fasthttp buffers the next
 		// request reuses; Immutable copies them (learned on SanHolo).
 		Immutable:             true,
 		DisableStartupMessage: true,
-	})
+	}
+	if o.app != nil {
+		cfg.Views = o.app.views()
+	}
+	app := fiber.New(cfg)
 	// A handler panic must not end the process (Fiber does not recover by
 	// default), so recover is first in the chain.
 	app.Use(recover.New())
@@ -47,5 +55,17 @@ func New(db Pinger) *fiber.App {
 		}
 		return c.SendString("ready")
 	})
+	if o.app != nil {
+		o.app.mount(app)
+	}
 	return app
 }
+
+// Option customises New.
+type Option func(*options)
+
+type options struct{ app *App }
+
+// WithApp mounts the customer-facing pages (waitlist, sign-up, sign-in,
+// account) on the app.
+func WithApp(a *App) Option { return func(o *options) { o.app = a } }

@@ -1,0 +1,14 @@
+:root { color-scheme: light dark; --fg: #1b1f24; --bg: #fafafa; --muted: #5b6470; --line: #d0d5db; --accent: #1f5fbf; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6e9ed; --bg: #14171a; --muted: #9aa4af; --line: #343a41; --accent: #6ea8fe; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+main { max-width: 36rem; margin: 0 auto; padding: 2rem 16px; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+p { margin: 0 0 1rem; }
+label { display: block; margin-bottom: 0.25rem; }
+input[type=email], input[type=text] { width: 100%; box-sizing: border-box; padding: 0.5rem; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: inherit; font: inherit; }
+button { padding: 0.5rem 1rem; border: 1px solid var(--accent); border-radius: 4px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+button.plain { background: transparent; color: var(--accent); }
+a { color: var(--accent); }
+table { border-collapse: collapse; width: 100%; }
+td, th { text-align: left; padding: 0.5rem 0.5rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.muted { color: var(--muted); }

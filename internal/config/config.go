@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -21,7 +22,28 @@ type Config struct {
 	DatabaseURL string
 	ListenAddr  string
 	Beta        Beta
+	// AppBaseURL is the public origin of the control plane, without a
+	// trailing slash. Sign-in links are built from it.
+	AppBaseURL string
+	// TrustedProxies are the peers whose X-Forwarded-For is believed.
+	TrustedProxies []netip.Prefix
+	SMTP           SMTP
+	// Production is APP_ENV=production: mail must be configured.
+	Production bool
 }
+
+// SMTP holds the mail settings. Password is a secret: never log or print a
+// Config. An empty Host means log-only (nothing is sent).
+type SMTP struct {
+	Host     string
+	Port     string
+	Username string
+	Password string
+	From     string
+}
+
+// Enabled reports whether mail will really be sent.
+func (s SMTP) Enabled() bool { return s.Host != "" }
 
 // Beta holds the closed-beta limits.
 type Beta struct {
@@ -37,7 +59,8 @@ const defaultListenAddr = "127.0.0.1:8090"
 func Load(getenv func(string) string) (Config, error) {
 	c := Config{
 		ListenAddr: defaultListenAddr,
-		Beta:       Beta{MaxTenants: 20, MaxGameAccountsPerTenant: 1},
+		AppBaseURL: "http://127.0.0.1:8090",
+		Beta:       Beta{InviteOnly: true, MaxTenants: 20, MaxGameAccountsPerTenant: 1},
 	}
 	var errs []error
 
@@ -60,6 +83,11 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, fmt.Errorf("BETA_INVITE_ONLY %q: not a boolean", v))
 		}
 		c.Beta.InviteOnly = b
+		if err == nil && !b {
+			// Open sign-up would create an account on an address nobody
+			// has proved; verified sign-up is not built yet.
+			errs = append(errs, errors.New("BETA_INVITE_ONLY=false is not supported: open sign-up needs email verification, which does not exist yet"))
+		}
 	}
 	if err := positiveInt(getenv, "BETA_MAX_TENANTS", &c.Beta.MaxTenants); err != nil {
 		errs = append(errs, err)
@@ -67,7 +95,93 @@ func Load(getenv func(string) string) (Config, error) {
 	if err := positiveInt(getenv, "BETA_MAX_GAME_ACCOUNTS_PER_TENANT", &c.Beta.MaxGameAccountsPerTenant); err != nil {
 		errs = append(errs, err)
 	}
+	if v := getenv("APP_BASE_URL"); v != "" {
+		base, err := baseURL(v)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		c.AppBaseURL = base
+	}
+	proxies, err := prefixes("TRUSTED_PROXIES", getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.TrustedProxies = proxies
+
+	switch getenv("APP_ENV") {
+	case "", "development":
+	case "production":
+		c.Production = true
+	default:
+		errs = append(errs, fmt.Errorf("APP_ENV %q: want production or development", getenv("APP_ENV")))
+	}
+	c.SMTP = SMTP{
+		Host: getenv("SMTP_HOST"), Port: getenv("SMTP_PORT"), Username: getenv("SMTP_USERNAME"),
+		Password: getenv("SMTP_PASSWORD"), From: getenv("SMTP_FROM"),
+	}
+	switch {
+	case c.SMTP.Host == "" && c.Production:
+		errs = append(errs, errors.New("SMTP_HOST is required when APP_ENV=production"))
+	case c.SMTP.Host != "":
+		if c.SMTP.Port == "" {
+			c.SMTP.Port = "587"
+		}
+		if n, err := strconv.Atoi(c.SMTP.Port); err != nil || n < 1 || n > 65535 {
+			errs = append(errs, fmt.Errorf("SMTP_PORT %q: not a port", c.SMTP.Port))
+		}
+		if c.SMTP.From == "" {
+			c.SMTP.From = "no-reply@" + c.SMTP.Host
+		}
+		if strings.ContainsAny(c.SMTP.From, "\r\n") {
+			errs = append(errs, errors.New("SMTP_FROM: contains a line break"))
+		}
+		if c.SMTP.Username != "" && c.SMTP.Password == "" {
+			errs = append(errs, errors.New("SMTP_USERNAME is set but SMTP_PASSWORD is not"))
+		}
+	}
 	return c, errors.Join(errs...)
+}
+
+// baseURL accepts an origin only: https, or http on a loopback host (local
+// development). Sign-in links carry a bearer token, so they never go out
+// over plain http to a real host.
+func baseURL(v string) (string, error) {
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+		return "", errors.New("APP_BASE_URL: want an origin such as https://app.example.org")
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		h := u.Hostname()
+		if ip, err := netip.ParseAddr(h); h != "localhost" && (err != nil || !ip.IsLoopback()) {
+			return "", errors.New("APP_BASE_URL: http is allowed for loopback hosts only")
+		}
+	default:
+		return "", errors.New("APP_BASE_URL: scheme must be https")
+	}
+	return u.Scheme + "://" + u.Host, nil
+}
+
+// prefixes parses a comma-separated list of CIDRs or bare addresses.
+func prefixes(name, v string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			a, aerr := netip.ParseAddr(part)
+			if aerr != nil {
+				return nil, fmt.Errorf("%s %q: not a CIDR or address", name, part)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 func positiveInt(getenv func(string) string, name string, dst *int) error {

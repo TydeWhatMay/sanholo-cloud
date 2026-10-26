@@ -1,0 +1,8 @@
+<h1>Sign in</h1>
+<p>SanHolo sends a sign-in link to your email address. There is no password.</p>
+<form method="post" action="/signin">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="email">Email address</label>
+<p><input id="email" type="email" name="email" required maxlength="254" autocomplete="email"></p>
+<button type="submit">Send the link</button>
+</form>

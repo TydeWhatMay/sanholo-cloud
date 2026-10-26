@@ -26,7 +26,7 @@ func TestLoad(t *testing.T) {
 				if c.ListenAddr != "127.0.0.1:8090" {
 					t.Errorf("ListenAddr = %q", c.ListenAddr)
 				}
-				if c.Beta.InviteOnly || c.Beta.MaxTenants != 20 || c.Beta.MaxGameAccountsPerTenant != 1 {
+				if !c.Beta.InviteOnly || c.Beta.MaxTenants != 20 || c.Beta.MaxGameAccountsPerTenant != 1 {
 					t.Errorf("Beta = %+v", c.Beta)
 				}
 			},
@@ -121,5 +121,90 @@ func TestLoadErrorOmitsPassword(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("error leaks password: %v", err)
+	}
+}
+
+func TestLoadHostedSettings(t *testing.T) {
+	base := map[string]string{"DATABASE_URL": "postgres://u:p@h/d"}
+	with := func(kv map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range kv {
+			m[k] = v
+		}
+		return m
+	}
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+		check   func(t *testing.T, c Config)
+	}{
+		{"defaults", with(nil), "", func(t *testing.T, c Config) {
+			if c.AppBaseURL != "http://127.0.0.1:8090" || len(c.TrustedProxies) != 0 {
+				t.Errorf("AppBaseURL=%q proxies=%v", c.AppBaseURL, c.TrustedProxies)
+			}
+		}},
+		{"https base url", with(map[string]string{"APP_BASE_URL": "https://app.sanholo.space/"}), "", func(t *testing.T, c Config) {
+			if c.AppBaseURL != "https://app.sanholo.space" {
+				t.Errorf("AppBaseURL=%q", c.AppBaseURL)
+			}
+		}},
+		{"http loopback ok", with(map[string]string{"APP_BASE_URL": "http://localhost:8090"}), "", nil},
+		{"http non-loopback refused", with(map[string]string{"APP_BASE_URL": "http://app.sanholo.space"}), "APP_BASE_URL", nil},
+		{"base url with path refused", with(map[string]string{"APP_BASE_URL": "https://app.sanholo.space/x"}), "APP_BASE_URL", nil},
+		{"proxies", with(map[string]string{"TRUSTED_PROXIES": "10.0.0.0/8, 192.0.2.1,2001:db8::/32"}), "", func(t *testing.T, c Config) {
+			if len(c.TrustedProxies) != 3 || c.TrustedProxies[1].String() != "192.0.2.1/32" {
+				t.Errorf("proxies=%v", c.TrustedProxies)
+			}
+		}},
+		{"bad proxy", with(map[string]string{"TRUSTED_PROXIES": "10.0.0.0/8,nope"}), "TRUSTED_PROXIES", nil},
+		{"open sign-up refused", with(map[string]string{"BETA_INVITE_ONLY": "false"}), "BETA_INVITE_ONLY", nil},
+		{"invite only explicit", with(map[string]string{"BETA_INVITE_ONLY": "true"}), "", nil},
+		{"no smtp host in development", with(nil), "", func(t *testing.T, c Config) {
+			if c.SMTP.Host != "" || c.Production {
+				t.Errorf("SMTP=%+v production=%v", c.SMTP, c.Production)
+			}
+		}},
+		{"production needs smtp host", with(map[string]string{"APP_ENV": "production"}), "SMTP_HOST", nil},
+		{"unknown app env", with(map[string]string{"APP_ENV": "prod"}), "APP_ENV", nil},
+		{"smtp defaults", with(map[string]string{"SMTP_HOST": "send.ahasend.com"}), "", func(t *testing.T, c Config) {
+			if c.SMTP.Port != "587" || c.SMTP.From != "no-reply@send.ahasend.com" {
+				t.Errorf("SMTP=%+v", c.SMTP)
+			}
+		}},
+		{"smtp complete in production", with(map[string]string{
+			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_PORT": "465",
+			"SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw", "SMTP_FROM": "SanHolo <no-reply@sanholo.space>",
+		}), "", func(t *testing.T, c Config) {
+			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
+				t.Errorf("SMTP=%+v", c.SMTP)
+			}
+		}},
+		{"username needs password", with(map[string]string{"SMTP_HOST": "h", "SMTP_USERNAME": "u"}), "SMTP_PASSWORD", nil},
+		{"bad port", with(map[string]string{"SMTP_HOST": "h", "SMTP_PORT": "x"}), "SMTP_PORT", nil},
+		{"line break in from", with(map[string]string{"SMTP_HOST": "h", "SMTP_FROM": "a@b.c\r\nBcc: x@y.z"}), "SMTP_FROM", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(env(tc.env))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				if strings.Contains(err.Error(), "pw") {
+					t.Fatalf("error leaks the password: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.check != nil {
+				tc.check(t, c)
+			}
+		})
 	}
 }

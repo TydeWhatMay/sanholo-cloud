@@ -1,0 +1,8 @@
+<h1>Create your account</h1>
+<form method="post" action="/signup">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="code" value="{{.Code}}">
+<label for="email">Email address</label>
+<p><input id="email" type="email" name="email" required maxlength="254" value="{{.Email}}"{{if .Code}} readonly{{end}}></p>
+<button type="submit">Create the account</button>
+</form>

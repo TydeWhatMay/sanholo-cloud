@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,17 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/dbtest"
 	"github.com/lhaig/sanholo-cloud/internal/tenant"
 )
+
+// migrationCount is the number of embedded migration files: each applies
+// exactly once however many times Migrate runs.
+func migrationCount(t *testing.T) int {
+	t.Helper()
+	files, err := filepath.Glob("migrations/*.sql")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("list migrations: %v", err)
+	}
+	return len(files)
+}
 
 func TestMigrateTwice(t *testing.T) {
 	ctx := context.Background()
@@ -26,8 +38,8 @@ func TestMigrateTwice(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1 after two runs", n)
+	if want := migrationCount(t); n != want {
+		t.Fatalf("schema_migrations rows = %d, want %d after two runs", n, want)
 	}
 }
 
@@ -54,8 +66,8 @@ func TestMigrateConcurrent(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1", n)
+	if want := migrationCount(t); n != want {
+		t.Fatalf("schema_migrations rows = %d, want %d", n, want)
 	}
 }
 
@@ -106,16 +118,16 @@ func TestAccountEmailUniqueCaseInsensitive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := pool.Exec(ctx, "INSERT INTO accounts (tenant_id, email) VALUES ($1, $2)", "t1", "Ann@Example.com"); err != nil {
+	if _, err := pool.Exec(ctx, "INSERT INTO accounts (tenant_id, email, email_hash) VALUES ($1, $2, 'h1')", "t1", "Ann@Example.com"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := pool.Exec(ctx, "INSERT INTO accounts (tenant_id, email) VALUES ($1, $2)", "t2", "ann@example.COM")
+	_, err := pool.Exec(ctx, "INSERT INTO accounts (tenant_id, email, email_hash) VALUES ($1, $2, 'h2')", "t2", "ann@example.COM")
 	var pgErr *pgconn.PgError
 	if err == nil || !asPg(err, &pgErr) || pgErr.Code != "23505" {
 		t.Fatalf("duplicate email differing in case: err = %v, want unique_violation", err)
 	}
 	// An account needs a real tenant.
-	_, err = pool.Exec(ctx, "INSERT INTO accounts (tenant_id, email) VALUES ($1, $2)", "nope", "x@example.com")
+	_, err = pool.Exec(ctx, "INSERT INTO accounts (tenant_id, email, email_hash) VALUES ($1, $2, 'h3')", "nope", "x@example.com")
 	if err == nil || !asPg(err, &pgErr) || pgErr.Code != "23503" {
 		t.Fatalf("orphan account: err = %v, want foreign_key_violation", err)
 	}
