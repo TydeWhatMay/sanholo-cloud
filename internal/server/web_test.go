@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/dbtest"
 )
@@ -20,9 +21,10 @@ import (
 const baseURL = "http://127.0.0.1:8090"
 
 type env struct {
-	app  *fiber.App
-	svc  *auth.Service
-	pool *pgxpool.Pool
+	app   *fiber.App
+	svc   *auth.Service
+	admin *admin.Service
+	pool  *pgxpool.Pool
 }
 
 func newEnv(t *testing.T, opt auth.Options, trusted ...netip.Prefix) *env {
@@ -33,8 +35,9 @@ func newEnv(t *testing.T, opt auth.Options, trusted ...netip.Prefix) *env {
 		opt.MaxTenants = 20
 	}
 	svc := auth.New(pool, opt)
-	app := New(pool, WithApp(&App{Auth: svc, TrustedProxies: trusted}))
-	return &env{app: app, svc: svc, pool: pool}
+	adm := admin.New(pool, svc)
+	app := New(pool, WithApp(&App{Auth: svc, Admin: adm, TrustedProxies: trusted}))
+	return &env{app: app, svc: svc, admin: adm, pool: pool}
 }
 
 // client is a minimal cookie jar over app.Test.
@@ -71,6 +74,12 @@ func (c *client) do(method, path string, form url.Values, hdr map[string]string)
 	for _, ck := range c.cookies {
 		req.AddCookie(&http.Cookie{Name: ck.Name, Value: ck.Value})
 	}
+	return c.send(req)
+}
+
+// send runs a prepared request and keeps the cookies it sets.
+func (c *client) send(req *http.Request) result {
+	c.t.Helper()
 	resp, err := c.app.Test(req, -1)
 	if err != nil {
 		c.t.Fatal(err)

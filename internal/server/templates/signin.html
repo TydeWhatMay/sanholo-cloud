@@ -6,3 +6,8 @@
 <p><input id="email" type="email" name="email" required maxlength="254" autocomplete="email"></p>
 <button type="submit">Send the link</button>
 </form>
+{{if .Passkeys}}<h2>Use a passkey</h2>
+<p>A passkey signs you in on this device without an email.</p>
+<p><button type="button" data-passkey="login" data-csrf="{{.CSRF}}" hidden>Sign in with a passkey</button></p>
+<p class="muted" data-passkey-status role="status"></p>
+{{end}}

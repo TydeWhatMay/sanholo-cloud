@@ -17,6 +17,12 @@ const (
 	refreshAfter = 5 * time.Minute
 )
 
+// How a session was opened. /admin accepts only MethodPasskey.
+const (
+	MethodMagicLink = "magic_link"
+	MethodPasskey   = "passkey"
+)
+
 // ErrNoSession means the cookie names no live session.
 var ErrNoSession = errors.New("no session")
 
@@ -30,18 +36,21 @@ type Session struct {
 	LastSeenAt time.Time
 	ExpiresAt  time.Time
 	UserAgent  string
+	// Method is MethodMagicLink or MethodPasskey.
+	Method     string
+	IsOperator bool
 	// Refreshed is true when this lookup extended the expiry, so the caller
 	// should re-issue the cookie with the new lifetime.
 	Refreshed bool
 }
 
-func (s *Service) createSession(ctx context.Context, tx pgx.Tx, accountID, userAgent string, now time.Time) (string, time.Time, error) {
+func (s *Service) createSession(ctx context.Context, tx pgx.Tx, accountID, userAgent, method string, now time.Time) (string, time.Time, error) {
 	secret := NewSecret()
 	expires := now.Add(SessionTTL)
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO account_sessions (secret_hash, account_id, created_at, last_seen_at, expires_at, user_agent)
-		VALUES ($1, $2, $3, $3, $4, $5)`,
-		HashSecret(secret), accountID, now, expires, truncateUA(userAgent)); err != nil {
+		INSERT INTO account_sessions (secret_hash, account_id, created_at, last_seen_at, expires_at, user_agent, method)
+		VALUES ($1, $2, $3, $3, $4, $5, $6)`,
+		HashSecret(secret), accountID, now, expires, truncateUA(userAgent), method); err != nil {
 		return "", time.Time{}, fmt.Errorf("auth: create session: %w", err)
 	}
 	return secret, expires, nil
@@ -70,10 +79,10 @@ func (s *Service) LookupSession(ctx context.Context, secret string) (Session, er
 	now := s.now()
 	var ses Session
 	err := s.pool.QueryRow(ctx, `
-		SELECT s.id::text, s.account_id::text, a.tenant_id, a.email, s.created_at, s.last_seen_at, s.expires_at, s.user_agent
+		SELECT s.id::text, s.account_id::text, a.tenant_id, a.email, s.created_at, s.last_seen_at, s.expires_at, s.user_agent, s.method, a.is_operator
 		FROM account_sessions s JOIN accounts a ON a.id = s.account_id
 		WHERE s.secret_hash = $1 AND s.expires_at > $2`, HashSecret(secret), now,
-	).Scan(&ses.ID, &ses.AccountID, &ses.TenantID, &ses.Email, &ses.CreatedAt, &ses.LastSeenAt, &ses.ExpiresAt, &ses.UserAgent)
+	).Scan(&ses.ID, &ses.AccountID, &ses.TenantID, &ses.Email, &ses.CreatedAt, &ses.LastSeenAt, &ses.ExpiresAt, &ses.UserAgent, &ses.Method, &ses.IsOperator)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrNoSession
 	}

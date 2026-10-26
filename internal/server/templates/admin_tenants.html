@@ -1,0 +1,20 @@
+<h1>Admin</h1>
+{{template "admin_nav" .}}
+<h2>Tenants</h2>
+{{if .Tenants}}<table>
+<tr><th>Tenant</th><th>Account</th><th>Created</th><th>Status</th><th>Instance</th><th>Last health</th><th></th></tr>
+{{range .Tenants}}<tr>
+<td>{{.ID}}</td>
+<td>{{.Email}}</td>
+<td>{{.Created}}</td>
+<td>{{.Status}}</td>
+<td class="muted">not provisioned</td>
+<td class="muted">not provisioned</td>
+<td><form method="post" action="/admin/tenants/{{.ID}}/{{if eq .Status "suspended"}}unsuspend{{else}}suspend{{end}}">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button class="plain" type="submit">{{if eq .Status "suspended"}}Unsuspend{{else}}Suspend{{end}}</button>
+</form></td>
+</tr>
+{{end}}
+</table>
+{{else}}<p>There are no tenants.</p>{{end}}

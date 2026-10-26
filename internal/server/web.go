@@ -13,6 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/gofiber/template/html/v2"
 
+	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 )
 
@@ -30,6 +31,8 @@ const sessionCookie = "__Host-sanholo_session"
 // App is the customer-facing surface of the control plane.
 type App struct {
 	Auth *auth.Service
+	// Admin serves /admin; nil leaves the admin pages off (404).
+	Admin *admin.Service
 	// TrustedProxies are the edge addresses whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
 }
@@ -60,11 +63,17 @@ func (a *App) mount(app *fiber.App) {
 	app.Post("/signin", a.signin)
 	app.Get("/signin/verify", a.confirmPage)
 	app.Post("/signin/verify", a.verify)
+	app.Post("/signin/passkey/begin", a.passkeyLoginBegin)
+	app.Post("/signin/passkey/finish", a.passkeyLoginFinish)
 
 	acct := app.Group("/account", a.requireSession)
 	acct.Get("/", a.account)
 	acct.Post("/sessions/:id/revoke", a.revoke)
+	acct.Post("/passkeys/register/begin", a.passkeyRegisterBegin)
+	acct.Post("/passkeys/register/finish", a.passkeyRegisterFinish)
+	acct.Post("/passkeys/:id/delete", a.passkeyDelete)
 	app.Post("/signout", a.requireSession, a.signout)
+	a.mountAdmin(app)
 }
 
 // securityHeaders keeps pages out of caches, frames and referrers. The
@@ -170,7 +179,7 @@ func (a *App) inviteError(c *fiber.Ctx, err error) error {
 }
 
 func (a *App) signinForm(c *fiber.Ctx) error {
-	return a.render(c, fiber.StatusOK, "signin", "Sign in", nil)
+	return a.render(c, fiber.StatusOK, "signin", "Sign in", fiber.Map{"Passkeys": a.Auth.PasskeysEnabled()})
 }
 
 func (a *App) signin(c *fiber.Ctx) error {
@@ -277,7 +286,24 @@ func (a *App) account(c *fiber.Ctx) error {
 	for _, s := range list {
 		rows = append(rows, row{ID: s.ID, UserAgent: s.UserAgent, LastSeen: s.LastSeenAt.UTC().Format("2006-01-02 15:04 UTC"), Current: s.ID == ses.ID})
 	}
-	return a.render(c, fiber.StatusOK, "account", "Account", fiber.Map{"Email": ses.Email, "Sessions": rows})
+	type pk struct{ ID, Created, LastUsed string }
+	var keys []pk
+	if a.Auth.PasskeysEnabled() {
+		list, err := a.Auth.ListPasskeys(c.UserContext(), ses.AccountID)
+		if err != nil {
+			return a.serverError(c)
+		}
+		for _, p := range list {
+			k := pk{ID: p.ID, Created: p.CreatedAt.UTC().Format("2006-01-02"), LastUsed: "Never"}
+			if p.LastUsedAt != nil {
+				k.LastUsed = p.LastUsedAt.UTC().Format("2006-01-02")
+			}
+			keys = append(keys, k)
+		}
+	}
+	return a.render(c, fiber.StatusOK, "account", "Account", fiber.Map{
+		"Email": ses.Email, "Sessions": rows, "Passkeys": a.Auth.PasskeysEnabled(), "Keys": keys, "IsOperator": ses.IsOperator,
+	})
 }
 
 func (a *App) revoke(c *fiber.Ctx) error {

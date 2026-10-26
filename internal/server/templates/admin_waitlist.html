@@ -1,0 +1,19 @@
+<h1>Admin</h1>
+{{template "admin_nav" .}}
+<h2>Waiting list</h2>
+{{if .Entries}}<table>
+<tr><th>Address</th><th>Joined</th><th>Invite</th><th></th></tr>
+{{range .Entries}}<tr>
+<td>{{.Email}}</td>
+<td>{{.Joined}}</td>
+<td>{{.Invite}}</td>
+<td>{{if or .CanIssue .CanResend}}<form method="post" action="/admin/waitlist/{{if .CanIssue}}invite{{else}}resend{{end}}">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="email" value="{{.Email}}">
+<button class="plain" type="submit">{{if .CanIssue}}Issue invite{{else}}Resend invite{{end}}</button>
+</form>{{end}}</td>
+</tr>
+{{end}}
+</table>
+<p class="muted">An invite code is sent by email and is not shown here.</p>
+{{else}}<p>The waiting list is empty.</p>{{end}}

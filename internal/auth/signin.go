@@ -162,7 +162,7 @@ func (s *Service) ConsumeMagicLink(ctx context.Context, token, userAgent string)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("auth: consume: %w", err)
 	}
-	secret, expires, err = s.createSession(ctx, tx, accountID, userAgent, now)
+	secret, expires, err = s.createSession(ctx, tx, accountID, userAgent, MethodMagicLink, now)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -179,6 +179,7 @@ func (s *Service) Cleanup(ctx context.Context) error {
 		`DELETE FROM signin_requests WHERE processed_at < $1 - interval '1 day'`,
 		`DELETE FROM magic_links WHERE expires_at < $1 - interval '1 day'`,
 		`DELETE FROM account_sessions WHERE expires_at < $1`,
+		`DELETE FROM webauthn_challenges WHERE expires_at < $1`,
 		`DELETE FROM rate_counters WHERE window_start < $1 - interval '2 days'`,
 		`DELETE FROM mail_outbox WHERE (sent_at IS NOT NULL OR failed_at IS NOT NULL) AND created_at < $1 - interval '7 days'`,
 	} {

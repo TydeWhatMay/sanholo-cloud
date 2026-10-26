@@ -28,6 +28,9 @@ type Config struct {
 	// TrustedProxies are the peers whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
 	SMTP           SMTP
+	// WebAuthn holds the passkey relying-party settings. Enabled is false
+	// when no usable relying party exists (development on a bare IP).
+	WebAuthn WebAuthn
 	// Production is APP_ENV=production: mail must be configured.
 	Production bool
 }
@@ -41,6 +44,18 @@ type SMTP struct {
 	Password string
 	From     string
 }
+
+// WebAuthn is the relying party for passkeys. RPID is the registrable domain
+// the credentials are bound to; RPOrigin is the exact origin the browser
+// reports. Credentials made under one RPID never work under another.
+type WebAuthn struct {
+	RPID     string
+	RPOrigin string
+	RPName   string
+}
+
+// Enabled reports whether passkeys can be offered.
+func (w WebAuthn) Enabled() bool { return w.RPID != "" }
 
 // Enabled reports whether mail will really be sent.
 func (s SMTP) Enabled() bool { return s.Host != "" }
@@ -139,7 +154,62 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("SMTP_USERNAME is set but SMTP_PASSWORD is not"))
 		}
 	}
+	wa, err := webAuthn(getenv, c.AppBaseURL)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.WebAuthn = wa
+	if c.Production && !wa.Enabled() {
+		errs = append(errs, errors.New("WEBAUTHN_RP_ID is required when APP_ENV=production: operators sign in with a passkey"))
+	}
 	return c, errors.Join(errs...)
+}
+
+// webAuthn reads WEBAUTHN_RP_ID, WEBAUTHN_RP_ORIGIN and WEBAUTHN_RP_NAME.
+// Unset, the RP ID is the host of APP_BASE_URL and the origin is
+// APP_BASE_URL; a bare IP host cannot be an RP ID, so passkeys stay off.
+// The origin is https, or http on localhost only, and its host must be the
+// RP ID or a subdomain of it (the WebAuthn rule).
+func webAuthn(getenv func(string) string, appBase string) (WebAuthn, error) {
+	w := WebAuthn{RPID: getenv("WEBAUTHN_RP_ID"), RPOrigin: getenv("WEBAUTHN_RP_ORIGIN"), RPName: getenv("WEBAUTHN_RP_NAME")}
+	if w.RPName == "" {
+		w.RPName = "SanHolo"
+	}
+	if w.RPOrigin == "" {
+		w.RPOrigin = appBase
+	}
+	if w.RPID == "" {
+		u, err := url.Parse(w.RPOrigin)
+		if err != nil || u.Hostname() == "" {
+			return WebAuthn{}, errors.New("WEBAUTHN_RP_ORIGIN: not an origin")
+		}
+		if _, err := netip.ParseAddr(u.Hostname()); err == nil {
+			return WebAuthn{RPName: w.RPName}, nil
+		}
+		w.RPID = u.Hostname()
+	}
+	if strings.ContainsAny(w.RPID, "/:@ ") || w.RPID != strings.ToLower(w.RPID) {
+		return WebAuthn{}, fmt.Errorf("WEBAUTHN_RP_ID %q: want a lower-case domain name", w.RPID)
+	}
+	u, err := url.Parse(w.RPOrigin)
+	if err != nil || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+		return WebAuthn{}, errors.New("WEBAUTHN_RP_ORIGIN: want an origin such as https://app.example.org")
+	}
+	host := u.Hostname()
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if host != "localhost" && !strings.HasSuffix(host, ".localhost") {
+			return WebAuthn{}, errors.New("WEBAUTHN_RP_ORIGIN: http is allowed for localhost only")
+		}
+	default:
+		return WebAuthn{}, errors.New("WEBAUTHN_RP_ORIGIN: scheme must be https")
+	}
+	if host != w.RPID && !strings.HasSuffix(host, "."+w.RPID) {
+		return WebAuthn{}, fmt.Errorf("WEBAUTHN_RP_ID %q: the origin host %q is not that domain or a subdomain of it", w.RPID, host)
+	}
+	w.RPOrigin = u.Scheme + "://" + u.Host
+	return w, nil
 }
 
 // baseURL accepts an origin only: https, or http on a loopback host (local

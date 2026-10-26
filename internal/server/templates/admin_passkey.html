@@ -1,0 +1,6 @@
+<h1>Admin sign-in</h1>
+<p>The admin pages need a session opened with a passkey.</p>
+{{if .Passkeys}}<p><button type="button" data-passkey="login" data-csrf="{{.CSRF}}" hidden>Sign in with a passkey</button></p>
+<p class="muted" data-passkey-status role="status"></p>
+<p>An account without a passkey adds one on the <a href="/account">account page</a>.</p>
+{{else}}<p>Passkeys are not enabled on this server.</p>{{end}}

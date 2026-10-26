@@ -1,5 +1,22 @@
 <h1>Account</h1>
-<p>Signed in as {{.Email}}.</p>
+<p>Signed in as {{.Email}}.{{if .IsOperator}} <a href="/admin">Admin</a>{{end}}</p>
+{{if .Passkeys}}<h2>Passkeys</h2>
+{{if .Keys}}<table>
+<tr><th>Added</th><th>Last used</th><th></th></tr>
+{{range .Keys}}<tr>
+<td>{{.Created}}</td>
+<td>{{.LastUsed}}</td>
+<td><form method="post" action="/account/passkeys/{{.ID}}/delete">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button class="plain" type="submit">Delete</button>
+</form></td>
+</tr>
+{{end}}
+</table>
+{{else}}<p>No passkeys yet.</p>{{end}}
+<p><button type="button" data-passkey="register" data-csrf="{{.CSRF}}" hidden>Add a passkey</button></p>
+<p class="muted" data-passkey-status role="status"></p>
+{{end}}
 <h2>Sessions</h2>
 <table>
 <tr><th>Device</th><th>Last used</th><th></th></tr>

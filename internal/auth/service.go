@@ -3,6 +3,7 @@ package auth
 import (
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -11,6 +12,8 @@ type Options struct {
 	MaxTenants int
 	// BaseURL is the public origin sign-in links are built from.
 	BaseURL string
+	// WebAuthn enables passkeys; nil turns them off.
+	WebAuthn *webauthn.WebAuthn
 }
 
 // Service is the account lifecycle over one PostgreSQL pool. It is safe for

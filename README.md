@@ -29,6 +29,9 @@ for them.
 | `SMTP_PORT` | Default `587` (STARTTLS). `465` is implicit TLS. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | When the username is set, STARTTLS and AUTH are mandatory; the service refuses to send without them. The password comes from qm and is never logged. |
 | `SMTP_FROM` | Sender. Default `no-reply@<SMTP_HOST>`. |
+| `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
+| `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
+| `WEBAUTHN_RP_NAME` | Name shown by the authenticator. Default `SanHolo`. |
 
 In operation, the credentials come from qm:
 
@@ -51,12 +54,44 @@ curl http://127.0.0.1:8090/readyz    # 200 only when the database answers
 ### Sign-up and sign-in
 
 Pages: `/` (waiting list), `/waitlist`, `/signup`, `/signin`,
-`/signin/verify` (the emailed link), `/account` (sessions), `/signout`.
+`/signin/verify` (the emailed link), `/account` (sessions, passkeys), `/signout`.
 The emailed link opens a page with one button; the button signs in. Mail goes through the `mail_outbox` table and a worker that retries with
 backoff. A sign-in request stores only a hash of the address; a worker turns
 it into a link and a queued email when an account exists, so the HTTP answer
 is the same for every address. Issue an invite from Go with
 `auth.Service.IssueInvite` (the admin page will call it).
+
+### Passkeys
+
+A signed-in account adds a passkey on `/account` and can then sign in from
+`/signin` with no email address. Passkeys are discoverable and always
+require user verification (PIN or biometric). The ceremony state is stored
+server-side, bound to the browser by a `__Host-` cookie, single use, and
+valid for 5 minutes. A sign-in whose sign counter does not advance is
+refused. The page script is `static/passkey.js`; the content security policy
+stays `script-src 'self'`. Library: `github.com/go-webauthn/webauthn` v0.18.2,
+the current release (September 2026) of the maintained fork of the
+original Duo library, with discoverable login and clone detection.
+
+### Admin
+
+`/admin` (tenants), `/admin/waitlist` and `/admin/audit`. Access needs a
+session, `accounts.is_operator`, and a session opened with a passkey. A
+non-operator gets a 404. An operator who signed in by magic link is asked to
+sign in with a passkey. Operator rights are granted only from the command
+line, with the same environment as the server:
+
+```sh
+sanholo-cloud operator grant <email>
+sanholo-cloud operator revoke <email>
+```
+
+Both write an audit row with actor `cli`. Every admin POST (issue or resend
+an invite, suspend or unsuspend a tenant) writes one audit row in the same
+transaction as the change. An invite code is sent by email only; the database
+keeps its hash and no admin page shows it. A suspended tenant keeps its place
+in the beta cap. The database holds no game token; a test fails if any
+column named for a token, secret or password is not a `*_hash`.
 
 ### The gate
 

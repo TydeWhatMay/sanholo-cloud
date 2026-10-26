@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/config"
 	"github.com/lhaig/sanholo-cloud/internal/db"
@@ -18,6 +21,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "operator" {
+		if err := runOperator(context.Background(), os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -35,9 +44,19 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var wa *webauthn.WebAuthn
+	if cfg.WebAuthn.Enabled() {
+		wa, err = auth.NewWebAuthn(cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, cfg.WebAuthn.RPName)
+		if err != nil {
+			log.Fatalf("passkeys: %v", err)
+		}
+	} else {
+		log.Print("passkeys: no relying party (APP_BASE_URL is an IP address); set WEBAUTHN_RP_ID to enable them")
+	}
 	svc := auth.New(pool, auth.Options{
 		MaxTenants: cfg.Beta.MaxTenants,
 		BaseURL:    cfg.AppBaseURL,
+		WebAuthn:   wa,
 	})
 	go svc.Run(ctx, 2*time.Second)
 	var mailer mail.Mailer = mail.LogSender{}
@@ -52,7 +71,7 @@ func main() {
 	w := &mail.Worker{Pool: pool, Mailer: mailer}
 	go w.Run(ctx, 2*time.Second)
 
-	app := server.New(pool, server.WithApp(&server.App{Auth: svc, TrustedProxies: cfg.TrustedProxies}))
+	app := server.New(pool, server.WithApp(&server.App{Auth: svc, Admin: admin.New(pool, svc), TrustedProxies: cfg.TrustedProxies}))
 	go func() {
 		<-ctx.Done()
 		_ = app.Shutdown()

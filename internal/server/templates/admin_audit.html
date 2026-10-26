@@ -1,0 +1,15 @@
+<h1>Admin</h1>
+{{template "admin_nav" .}}
+<h2>Audit log</h2>
+{{if .Entries}}<table>
+<tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr>
+{{range .Entries}}<tr>
+<td>{{.At}}</td>
+<td>{{.Actor}}</td>
+<td>{{.Action}}</td>
+<td>{{.Target}}</td>
+<td>{{.Details}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}<p>No admin actions are recorded.</p>{{end}}

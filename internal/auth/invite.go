@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/lhaig/sanholo-cloud/internal/mail"
 	"github.com/lhaig/sanholo-cloud/internal/tenant"
 )
 
@@ -44,6 +45,49 @@ func (s *Service) JoinWaitlist(ctx context.Context, email string) error {
 // plaintext code. This is the only moment the code exists in clear: the
 // database keeps its SHA-256.
 func (s *Service) IssueInvite(ctx context.Context, email string) (code string, expires time.Time, err error) {
+	return s.issueInvite(ctx, s.pool, email)
+}
+
+// IssueInviteTx is IssueInvite inside the caller's transaction, so the
+// invite, its email and an audit row commit together.
+func (s *Service) IssueInviteTx(ctx context.Context, tx pgx.Tx, email string) (code string, expires time.Time, err error) {
+	return s.issueInvite(ctx, tx, email)
+}
+
+// RevokeInvitesTx revokes every unused invite for the address, so a resend
+// leaves exactly one live code. It reports how many it revoked.
+func (s *Service) RevokeInvitesTx(ctx context.Context, tx pgx.Tx, email string) (int64, error) {
+	tag, err := tx.Exec(ctx, `
+		UPDATE invites SET revoked_at = $2
+		WHERE lower(email) = lower($1) AND used_at IS NULL AND revoked_at IS NULL`, email, s.now())
+	if err != nil {
+		return 0, fmt.Errorf("auth: revoke invites: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// SignupLink is the page an invite code opens.
+func (s *Service) SignupLink(code string) string {
+	return s.opt.BaseURL + "/signup?code=" + code
+}
+
+// InviteMessage is the invite email, in the company register.
+func InviteMessage(to, link string, expires time.Time) mail.Message {
+	return mail.Message{
+		To:      to,
+		Subject: "Your SanHolo invite",
+		Body: "TydeWhatMay invites you to the SanHolo beta. You asked to join the waiting list with this address.\n\n" +
+			link + "\n\n" +
+			"The link works once. It expires on " + expires.UTC().Format("2006-01-02") + ".\n" +
+			"If you did not ask to join, ignore this email. Nothing happens until the link is opened.\n",
+	}
+}
+
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (s *Service) issueInvite(ctx context.Context, db execer, email string) (code string, expires time.Time, err error) {
 	email, err = ValidateEmail(email)
 	if err != nil {
 		return "", time.Time{}, err
@@ -51,7 +95,7 @@ func (s *Service) IssueInvite(ctx context.Context, email string) (code string, e
 	code = NewSecret()
 	now := s.now()
 	expires = now.Add(InviteTTL)
-	_, err = s.pool.Exec(ctx,
+	_, err = db.Exec(ctx,
 		`INSERT INTO invites (code_hash, email, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
 		HashSecret(code), email, now, expires)
 	if err != nil {
@@ -65,15 +109,18 @@ func (s *Service) IssueInvite(ctx context.Context, email string) (code string, e
 func (s *Service) InviteEmail(ctx context.Context, code string) (string, error) {
 	var email string
 	var expires time.Time
-	var used *time.Time
+	var used, revoked *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT email, expires_at, used_at FROM invites WHERE code_hash = $1`, HashSecret(code),
-	).Scan(&email, &expires, &used)
+		`SELECT email, expires_at, used_at, revoked_at FROM invites WHERE code_hash = $1`, HashSecret(code),
+	).Scan(&email, &expires, &used, &revoked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrInviteInvalid
 	}
 	if err != nil {
 		return "", fmt.Errorf("auth: invite lookup: %w", err)
+	}
+	if revoked != nil {
+		return "", ErrInviteInvalid
 	}
 	if used != nil {
 		return "", ErrInviteUsed
@@ -114,12 +161,12 @@ func (s *Service) Redeem(ctx context.Context, code string) (tenantID string, err
 	var email string
 	{
 		var expires time.Time
-		var used *time.Time
+		var used, revoked *time.Time
 		err := tx.QueryRow(ctx,
-			`SELECT email, expires_at, used_at FROM invites WHERE code_hash = $1 FOR UPDATE`, HashSecret(code),
-		).Scan(&email, &expires, &used)
+			`SELECT email, expires_at, used_at, revoked_at FROM invites WHERE code_hash = $1 FOR UPDATE`, HashSecret(code),
+		).Scan(&email, &expires, &used, &revoked)
 		switch {
-		case errors.Is(err, pgx.ErrNoRows):
+		case errors.Is(err, pgx.ErrNoRows), err == nil && revoked != nil:
 			return "", ErrInviteInvalid
 		case err != nil:
 			return "", fmt.Errorf("auth: redeem: invite: %w", err)
@@ -131,7 +178,7 @@ func (s *Service) Redeem(ctx context.Context, code string) (tenantID string, err
 	}
 	var active int
 	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FROM tenants WHERE status IN ('pending', 'active')`).Scan(&active); err != nil {
+		`SELECT count(*) FROM tenants WHERE status IN ('pending', 'active', 'suspended')`).Scan(&active); err != nil {
 		return "", fmt.Errorf("auth: redeem: count: %w", err)
 	}
 	if active >= s.opt.MaxTenants {

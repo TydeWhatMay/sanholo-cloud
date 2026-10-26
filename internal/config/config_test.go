@@ -178,6 +178,7 @@ func TestLoadHostedSettings(t *testing.T) {
 		{"smtp complete in production", with(map[string]string{
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_PORT": "465",
 			"SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw", "SMTP_FROM": "SanHolo <no-reply@sanholo.space>",
+			"APP_BASE_URL": "https://app.sanholo.space", "WEBAUTHN_RP_ID": "app.sanholo.space",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)
@@ -204,6 +205,45 @@ func TestLoadHostedSettings(t *testing.T) {
 			}
 			if tc.check != nil {
 				tc.check(t, c)
+			}
+		})
+	}
+}
+
+func TestWebAuthnConfig(t *testing.T) {
+	base := map[string]string{"DATABASE_URL": "postgres://u@h/d"}
+	with := func(kv map[string]string) func(string) string {
+		return func(k string) string {
+			if v, ok := kv[k]; ok {
+				return v
+			}
+			return base[k]
+		}
+	}
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantID  string
+		wantErr bool
+	}{
+		{"bare IP default is off", map[string]string{}, "", false},
+		{"derived from base url", map[string]string{"APP_BASE_URL": "https://app.sanholo.space"}, "app.sanholo.space", false},
+		{"explicit parent domain", map[string]string{"APP_BASE_URL": "https://app.sanholo.space", "WEBAUTHN_RP_ID": "sanholo.space"}, "sanholo.space", false},
+		{"localhost over http", map[string]string{"APP_BASE_URL": "http://localhost:8090"}, "localhost", false},
+		{"http on a real host", map[string]string{"WEBAUTHN_RP_ID": "example.org", "WEBAUTHN_RP_ORIGIN": "http://example.org"}, "", true},
+		{"origin outside the rp id", map[string]string{"WEBAUTHN_RP_ID": "example.org", "WEBAUTHN_RP_ORIGIN": "https://example.com"}, "", true},
+		{"suffix is not a subdomain", map[string]string{"WEBAUTHN_RP_ID": "example.org", "WEBAUTHN_RP_ORIGIN": "https://badexample.org"}, "", true},
+		{"origin with a path", map[string]string{"WEBAUTHN_RP_ID": "example.org", "WEBAUTHN_RP_ORIGIN": "https://example.org/x"}, "", true},
+		{"production without rp id", map[string]string{"APP_ENV": "production", "SMTP_HOST": "m.example.org"}, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(with(tc.env))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && c.WebAuthn.RPID != tc.wantID {
+				t.Fatalf("RPID = %q, want %q", c.WebAuthn.RPID, tc.wantID)
 			}
 		})
 	}
