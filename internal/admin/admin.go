@@ -38,6 +38,10 @@ var (
 	// ErrRestart means the restart was recorded but Nomad did not carry it
 	// out; the instance state says what happened.
 	ErrRestart = errors.New("the restart could not be carried out")
+	// ErrInstance means the suspension or reinstatement was recorded but
+	// Nomad did not stop or start the bot; the instance state says what
+	// happened.
+	ErrInstance = errors.New("the bot could not be stopped or started")
 )
 
 // Service is the admin operations over one PostgreSQL pool.
@@ -259,8 +263,23 @@ func (s *Service) invite(ctx context.Context, actor, email, action, lookup strin
 
 // Suspend marks a pending or active tenant suspended. It keeps its place in
 // the beta cap and remembers the status to return to. The actor (an account
-// id when it comes from the web) cannot suspend their own tenant.
+// id when it comes from the web) cannot suspend their own tenant. Once the
+// state and the audit row are committed, the tenant's bot is stopped (the job
+// stays registered, so it can start again); if Nomad refuses, the instance is
+// recorded as failed and ErrInstance is returned.
 func (s *Service) Suspend(ctx context.Context, actor, tenantID string) error {
+	err := s.suspend(ctx, actor, tenantID)
+	if err != nil || !s.prov.Enabled() {
+		return err
+	}
+	if err := s.prov.Stop(ctx, tenantID, false); err != nil {
+		s.prov.RecordStopFailure(ctx, tenantID)
+		return ErrInstance
+	}
+	return nil
+}
+
+func (s *Service) suspend(ctx context.Context, actor, tenantID string) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		var own bool
 		if err := tx.QueryRow(ctx,
@@ -311,8 +330,21 @@ func (s *Service) RestartInstance(ctx context.Context, actor, tenantID string) e
 	return nil
 }
 
-// Unsuspend returns a suspended tenant to the status it had.
+// Unsuspend returns a suspended tenant to the status it had. Once that is
+// committed, the bot is started again in the background (a tenant with no
+// game account or no instance has nothing to start); a registration Nomad
+// refuses leaves the instance failed, which the account page shows.
 func (s *Service) Unsuspend(ctx context.Context, actor, tenantID string) error {
+	if err := s.unsuspend(ctx, actor, tenantID); err != nil {
+		return err
+	}
+	if s.prov.Enabled() {
+		s.prov.Trigger(tenantID)
+	}
+	return nil
+}
+
+func (s *Service) unsuspend(ctx context.Context, actor, tenantID string) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			UPDATE tenants SET status = coalesce(status_before_suspend, 'active'), status_before_suspend = NULL

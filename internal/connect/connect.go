@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lhaig/sanholo-cloud/internal/game"
+	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 )
 
@@ -51,6 +52,7 @@ type Service struct {
 	pool *pgxpool.Pool
 	sec  *secrets.Client
 	game *game.Client
+	prov *provision.Service
 	log  *slog.Logger
 	now  func() time.Time
 	pend *pendingStore
@@ -228,6 +230,13 @@ func (s *Service) store(ctx context.Context, e pendingEntry) (Connected, error) 
 			return Connected{}, ErrTaken
 		}
 		return Connected{}, fmt.Errorf("connect: record: %w", err)
+	}
+
+	// A deletion still pending from an earlier disconnect would remove what
+	// this connect is about to write; it is moot now (a later disconnect or
+	// account deletion purges everything again).
+	if _, err := tx.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1`, e.tenantID); err != nil {
+		return Connected{}, fmt.Errorf("connect: cancel pending deletions: %w", err)
 	}
 
 	cr := secrets.Credentials{APIToken: e.token, ReplicantCode: e.acct.ReplicantCode}

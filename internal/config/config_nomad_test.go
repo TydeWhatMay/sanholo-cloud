@@ -192,3 +192,41 @@ func TestLoadRolloutSettingsRefusals(t *testing.T) {
 		t.Errorf("ROLLOUT_BATCH_SIZE without NOMAD_ADDR: %v", err)
 	}
 }
+
+func TestLoadSoakAndVolumeSettings(t *testing.T) {
+	base := "https://app.sanholo.space"
+	c, err := Load(env(nomadEnv("APP_BASE_URL", base)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := c.Nomad
+	if n.CanarySoak != time.Hour || n.BatchSoak != 10*time.Minute {
+		t.Errorf("soak defaults = %v, %v; want 1h and 10m", n.CanarySoak, n.BatchSoak)
+	}
+	if n.Volume.CapacityMB != 1024 || n.Volume.Owner != "65532" || n.Volume.NodePool != "" || n.Volume.ConstraintAttr != "" {
+		t.Errorf("volume defaults = %+v", n.Volume)
+	}
+	c, err = Load(env(nomadEnv("APP_BASE_URL", base, "ROLLOUT_CANARY_SOAK", "2h", "ROLLOUT_BATCH_SOAK", "0",
+		"TENANT_VOLUME_SIZE_MB", "2048", "TENANT_VOLUME_NODE_POOL", "tenants", "TENANT_VOLUME_CONSTRAINT", "${meta.sanholo}=true")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n = c.Nomad
+	if n.CanarySoak != 2*time.Hour || n.BatchSoak != 0 || n.Volume.CapacityMB != 2048 || n.Volume.NodePool != "tenants" ||
+		n.Volume.ConstraintAttr != "${meta.sanholo}" || n.Volume.ConstraintValue != "true" {
+		t.Errorf("overrides = %v %v %+v", n.CanarySoak, n.BatchSoak, n.Volume)
+	}
+	for _, tc := range []struct{ name, value string }{
+		{"ROLLOUT_CANARY_SOAK", "soon"}, {"ROLLOUT_CANARY_SOAK", "25h"}, {"ROLLOUT_BATCH_SOAK", "-1m"},
+		{"TENANT_VOLUME_SIZE_MB", "0"}, {"TENANT_VOLUME_NODE_POOL", "a b"},
+		{"TENANT_VOLUME_CONSTRAINT", "nonsense"}, {"TENANT_VOLUME_CONSTRAINT", "meta.x=y"},
+	} {
+		if _, err := Load(env(nomadEnv("APP_BASE_URL", base, tc.name, tc.value))); err == nil {
+			t.Errorf("%s=%s accepted", tc.name, tc.value)
+		}
+	}
+	m := map[string]string{"DATABASE_URL": "postgres://u:p@h/d", "ROLLOUT_CANARY_SOAK": "1h"}
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "ROLLOUT_CANARY_SOAK") {
+		t.Errorf("ROLLOUT_CANARY_SOAK without NOMAD_ADDR: %v", err)
+	}
+}

@@ -104,11 +104,13 @@ func TestJobShape(t *testing.T) {
 }
 
 // Nomad writes a file identity to nomad_<name>.jwt and the client reads
-// nomad_qm.sanholo.jwt and nomad_sanholo.cloud.jwt, so the names are the
-// client's, not the planning notes'.
+// nomad_qm_sanholo.jwt and nomad_sanholo_cloud.jwt. Nomad refuses identity
+// names that do not match ^[a-zA-Z0-9-_]{1,128}$ (so no dots), while the
+// audiences keep theirs: qm's role and the alert verifier match
+// "qm.sanholo" and "sanholo.cloud".
 func TestJobIdentities(t *testing.T) {
 	task := firstTask(jobOf(t, nomadfake.Settings(), "acme-42"))
-	want := map[string]string{"qm.sanholo": "qm.sanholo", "sanholo.cloud": "sanholo.cloud"}
+	want := map[string]string{"qm_sanholo": "qm.sanholo", "sanholo_cloud": "sanholo.cloud"}
 	got := map[string]string{}
 	for _, raw := range task["Identities"].([]any) {
 		id := raw.(map[string]any)
@@ -122,7 +124,7 @@ func TestJobIdentities(t *testing.T) {
 		t.Errorf("identities = %v, want %v", got, want)
 	}
 	args := strings.Join(toStrings(task["Config"].(map[string]any)["args"]), " ")
-	for _, f := range []string{"${NOMAD_SECRETS_DIR}/nomad_qm.sanholo.jwt", "${NOMAD_SECRETS_DIR}/nomad_sanholo.cloud.jwt"} {
+	for _, f := range []string{"${NOMAD_SECRETS_DIR}/nomad_qm_sanholo.jwt", "${NOMAD_SECRETS_DIR}/nomad_sanholo_cloud.jwt"} {
 		if !strings.Contains(args, f) {
 			t.Errorf("args do not read %s", f)
 		}
@@ -150,9 +152,9 @@ func TestJobArgs(t *testing.T) {
 		"-qm-addr", "https://qm.example.org:8200",
 		"-qm-auth-mount", "nomad",
 		"-qm-role", "sanholo-tenant",
-		"-qm-identity-file", "${NOMAD_SECRETS_DIR}/nomad_qm.sanholo.jwt",
+		"-qm-identity-file", "${NOMAD_SECRETS_DIR}/nomad_qm_sanholo.jwt",
 		"-hosted-alert-url", "https://app.example.org/internal/alerts",
-		"-hosted-alert-identity-file", "${NOMAD_SECRETS_DIR}/nomad_sanholo.cloud.jwt",
+		"-hosted-alert-identity-file", "${NOMAD_SECRETS_DIR}/nomad_sanholo_cloud.jwt",
 		"-public-url", "https://acme-42.sanholo.space",
 		"-catalog", "/data/catalog.db",
 		"-hosted-vapid-public-key", nomadfake.VAPIDKey(),
@@ -319,7 +321,7 @@ func TestJobCarriesNoSecret(t *testing.T) {
 	if strings.Contains(out, `"Env"`) {
 		t.Error("the job sets environment variables; the client needs none")
 	}
-	scrubbed := strings.NewReplacer("${NOMAD_SECRETS_DIR}", "", "-credentials-source", "", "nomad_qm.sanholo.jwt", "", "nomad_sanholo.cloud.jwt", "").Replace(out)
+	scrubbed := strings.NewReplacer("${NOMAD_SECRETS_DIR}", "", "-credentials-source", "", "nomad_qm_sanholo.jwt", "", "nomad_sanholo_cloud.jwt", "").Replace(out)
 	for _, bad := range regexp.MustCompile(`(?i)token|secret|password|bearer|api_token|eyJ`).FindAllString(scrubbed, -1) {
 		t.Errorf("the rendered job contains %q", bad)
 	}

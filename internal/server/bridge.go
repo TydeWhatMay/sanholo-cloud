@@ -130,9 +130,9 @@ func (a *App) bridge(c *fiber.Ctx, tenantID string) error {
 	case err != nil:
 		return c.Status(fiber.StatusInternalServerError).SendString("Something went wrong")
 	}
-	// Another customer's session, or a suspended tenant: the same 404 as an
+	// Another customer's session, or a suspended or deleting tenant: the same 404 as an
 	// unknown host, so neither tells the visitor anything.
-	if bs.TenantID != tenantID || bs.Suspended {
+	if bs.TenantID != tenantID || bs.Unavailable {
 		return notFound(c)
 	}
 	return a.bridges.proxy.Handle(c, tenantID)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,15 +47,22 @@ const (
 
 	// QMIdentity is the name of the identity block for qm. Nomad writes the
 	// JWT to ${NOMAD_SECRETS_DIR}/nomad_<name>.jwt and the client reads
-	// nomad_qm.sanholo.jwt, so the name is the audience, dot included.
-	QMIdentity = "qm.sanholo"
+	// nomad_qm_sanholo.jwt. Nomad accepts identity names matching
+	// ^[a-zA-Z0-9-_]{1,128}$ only, so the name cannot be the audience (which
+	// has a dot): the name and the audience are separate constants.
+	QMIdentity = "qm_sanholo"
+	// QMAudience is the audience qm's jwt role accepts.
+	QMAudience = "qm.sanholo"
 	// AlertIdentity is the name of the identity block for alerts; the client
-	// reads nomad_sanholo.cloud.jwt.
-	AlertIdentity = "sanholo.cloud"
+	// reads nomad_sanholo_cloud.jwt.
+	AlertIdentity = "sanholo_cloud"
+	// AlertAudience is the audience the control plane verifies on alerts.
+	AlertAudience = "sanholo.cloud"
 
 	// QMRole and QMAuthMount name qm's tenant role and the jwt auth method
-	// mounted at auth/nomad (qm contract, Appendix A.1). The client defaults
-	// the mount to "jwt", so the job must pass it.
+	// mounted at auth/nomad (qm contract, Appendix A.1). The client now
+	// defaults the mount to "nomad" too; the job still passes it so the
+	// deployment does not depend on a default.
 	QMRole      = "sanholo-tenant"
 	QMAuthMount = "nomad"
 
@@ -64,6 +72,11 @@ const (
 	MetaSpec = "sanholo.spec"
 	// MetaVersion is the job meta key holding the image version.
 	MetaVersion = "sanholo.version"
+	// MetaRestart is the job meta key holding the restart counter. It is
+	// not part of the spec hash: changing it makes Nomad create a new job
+	// version (and a new deployment, and replace a failed allocation) while
+	// leaving drift and "already on this version" checks unchanged.
+	MetaRestart = "sanholo.restart"
 	// MetaTenant is the job meta key holding the tenant id.
 	MetaTenant = "sanholo.tenant"
 )
@@ -299,6 +312,10 @@ type VolumeRequest struct {
 	Type     string `json:"Type"`
 	Source   string `json:"Source"`
 	ReadOnly bool   `json:"ReadOnly"`
+	// AccessMode and AttachmentMode must be among the capabilities the
+	// dynamic host volume was created with (see HostVolumeSpec).
+	AccessMode     string `json:"AccessMode"`
+	AttachmentMode string `json:"AttachmentMode"`
 }
 
 type RestartPolicy struct {
@@ -395,8 +412,8 @@ type LogConfig struct {
 	MaxFileSizeMB int `json:"MaxFileSizeMB"`
 }
 
-// VolumeName is the host volume of a tenant. The infra session creates one
-// per tenant under this name (see deploy/README.md).
+// VolumeName is the dynamic host volume of a tenant. The provisioner creates
+// it (EnsureHostVolume) before it registers the job.
 func VolumeName(tenantID string) string { return JobPrefix + tenantID }
 
 // Image is the image reference of a version.
@@ -454,6 +471,13 @@ func BuildJob(s JobSettings, tenantID, version string) (Job, error) {
 // non-empty digest makes the task run image@digest. The digest is part of the
 // spec hash, so adding or changing one is a new registration.
 func BuildJobPinned(s JobSettings, tenantID, version, digest string) (Job, error) {
+	return BuildJobRestart(s, tenantID, version, digest, 0)
+}
+
+// BuildJobRestart is BuildJobPinned for an instance that has been restarted
+// restart times by registering the job again: a counter above zero is written
+// to the job meta after the spec hash is taken (see MetaRestart).
+func BuildJobRestart(s JobSettings, tenantID, version, digest string, restart int) (Job, error) {
 	if !tenant.Valid(tenantID) {
 		return Job{}, ErrInvalidJob
 	}
@@ -475,7 +499,10 @@ func BuildJobPinned(s JobSettings, tenantID, version, digest string) (Job, error
 		TaskGroups: []TaskGroup{{
 			Name: GroupName, Count: 1,
 			Networks: []Network{{Mode: "bridge", DynamicPorts: []Port{{Label: PortLabel, To: ContainerPort, HostNetwork: s.HostNetwork}}}},
-			Volumes:  map[string]VolumeRequest{"data": {Name: "data", Type: "host", Source: VolumeName(tenantID)}},
+			Volumes: map[string]VolumeRequest{"data": {
+				Name: "data", Type: "host", Source: VolumeName(tenantID),
+				AccessMode: VolumeAccessMode, AttachmentMode: VolumeAttachmentMode,
+			}},
 			// Three restarts in ten minutes, then the allocation fails and
 			// is rescheduled with a growing delay, for as long as it takes.
 			RestartPolicy:    RestartPolicy{Attempts: 3, Interval: 10 * time.Minute, Delay: 15 * time.Second, Mode: "fail"},
@@ -504,8 +531,8 @@ func BuildJobPinned(s JobSettings, tenantID, version, digest string) (Job, error
 					"security_opt": []string{"no-new-privileges"},
 				},
 				Identities: []Identity{
-					{Name: QMIdentity, Audience: []string{QMIdentity}, File: true, TTL: identityTTL},
-					{Name: AlertIdentity, Audience: []string{AlertIdentity}, File: true, TTL: identityTTL},
+					{Name: QMIdentity, Audience: []string{QMAudience}, File: true, TTL: identityTTL},
+					{Name: AlertIdentity, Audience: []string{AlertAudience}, File: true, TTL: identityTTL},
 				},
 				Templates: []Template{{
 					EmbeddedTmpl: strings.TrimSpace(s.ProxyPublicKeys) + "\n",
@@ -523,6 +550,9 @@ func BuildJobPinned(s JobSettings, tenantID, version, digest string) (Job, error
 		return Job{}, err
 	}
 	job.Meta[MetaSpec] = spec
+	if restart > 0 {
+		job.Meta[MetaRestart] = strconv.Itoa(restart)
+	}
 	return job, nil
 }
 

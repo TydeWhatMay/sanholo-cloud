@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 )
 
@@ -33,6 +34,9 @@ type Alloc struct {
 	// Address is host:port of the allocation's "http" port, empty until the
 	// allocation has one. This is where the proxy connects.
 	Address string
+	// Restarts is the sum of the tasks' restart counts. It only grows for
+	// one allocation, so a rise means the task was restarted.
+	Restarts int
 }
 
 // Deployment is the latest deployment of a job.
@@ -83,6 +87,9 @@ type wireAlloc struct {
 	DeploymentStatus *struct {
 		Healthy *bool `json:"Healthy"`
 	} `json:"DeploymentStatus"`
+	TaskStates map[string]struct {
+		Restarts int `json:"Restarts"`
+	} `json:"TaskStates"`
 	AllocatedResources *struct {
 		Shared struct {
 			Ports []struct {
@@ -108,6 +115,9 @@ func (c *Client) Allocations(ctx context.Context, jobID string) ([]Alloc, error)
 		a := Alloc{ID: w.ID, JobVersion: w.JobVersion, ClientStatus: w.ClientStatus, DesiredStatus: w.DesiredStatus}
 		if w.DeploymentStatus != nil {
 			a.Healthy = w.DeploymentStatus.Healthy
+		}
+		for _, ts := range w.TaskStates {
+			a.Restarts += ts.Restarts
 		}
 		if w.AllocatedResources != nil {
 			for _, p := range w.AllocatedResources.Shared.Ports {
@@ -167,14 +177,21 @@ type Status struct {
 	// current version, empty otherwise.
 	AllocID string
 	Address string
+	// Restarts is the restart count of that allocation.
+	Restarts int
+	// Checks and ChecksRead are the live check results (StatusLive only).
+	Checks     []LiveCheck
+	ChecksRead bool
 }
 
 // Status reads the job, its allocations and its latest deployment and
 // reduces them to a Phase. Only allocations of the job's current version
 // count: a rolled-back or superseded allocation says nothing about it.
 //
-// Health is Nomad's own: the deployment's verdict on the /healthz check and
-// the client status of the allocation. It is not a live poll of the check.
+// Health here is Nomad's deployment verdict on the /healthz check and the
+// client status of the allocation. Nomad decides that verdict once, after
+// min_healthy_time, and never changes it, so it says nothing about the
+// instance later; StatusLive adds the live check results.
 func (c *Client) Status(ctx context.Context, jobID string) (Status, error) {
 	job, err := c.Job(ctx, jobID)
 	if err != nil {
@@ -196,7 +213,7 @@ func (c *Client) Status(ctx context.Context, jobID string) (Status, error) {
 		if a.JobVersion != job.Version || a.DesiredStatus != "run" || a.ClientStatus != "running" {
 			continue
 		}
-		st.AllocID, st.Address = a.ID, a.Address
+		st.AllocID, st.Address, st.Restarts = a.ID, a.Address, a.Restarts
 		switch {
 		case a.Healthy != nil && *a.Healthy:
 			st.Phase = PhaseHealthy
@@ -222,3 +239,69 @@ func (c *Client) Status(ctx context.Context, jobID string) (Status, error) {
 }
 
 func isNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
+
+// CheckStatus is the state of one service check on an allocation.
+type CheckStatus string
+
+const (
+	CheckSuccess CheckStatus = "success"
+	CheckFailure CheckStatus = "failure"
+	CheckPending CheckStatus = "pending"
+)
+
+// LiveCheck is a live service check result.
+type LiveCheck struct {
+	Name   string
+	Status CheckStatus
+}
+
+// Checks reads the live results of the Nomad-provider service checks of an
+// allocation (GET /v1/allocation/<id>/checks). Verified against a Nomad
+// 2.0.6 agent: the answer is a map from check id to {Check, Service, Status,
+// Output, StatusCode, Timestamp, Mode}, Status being "success" for a passing
+// check. "failure" and "pending" are taken from Nomad's documentation (a
+// failing check could not be produced against the dev agent).
+func (c *Client) Checks(ctx context.Context, allocID string) ([]LiveCheck, error) {
+	if !c.Enabled() {
+		return nil, ErrDisabled
+	}
+	if !allocIDRE.MatchString(allocID) {
+		return nil, &Error{Op: "checks", Err: ErrInvalidJob}
+	}
+	var m map[string]struct {
+		Check  string `json:"Check"`
+		Status string `json:"Status"`
+	}
+	if err := c.do(ctx, request{op: "checks", method: http.MethodGet, path: "/v1/allocation/" + allocID + "/checks"}, &m); err != nil {
+		return nil, err
+	}
+	out := make([]LiveCheck, 0, len(m))
+	for _, v := range m {
+		out = append(out, LiveCheck{Name: v.Check, Status: CheckStatus(v.Status)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// StatusLive is Status plus the live check results of the running
+// allocation: a healthy phase with a failing check becomes PhaseUnhealthy,
+// because the deployment verdict, once healthy, never changes back. Checks is
+// set when they were read. When the checks cannot be read the plain status
+// stands.
+func (c *Client) StatusLive(ctx context.Context, jobID string) (Status, error) {
+	st, err := c.Status(ctx, jobID)
+	if err != nil || st.AllocID == "" || (st.Phase != PhaseHealthy && st.Phase != PhaseUnhealthy) {
+		return st, err
+	}
+	checks, cerr := c.Checks(ctx, st.AllocID)
+	if cerr != nil {
+		return st, nil
+	}
+	st.Checks, st.ChecksRead = checks, true
+	for _, ch := range checks {
+		if ch.Status == CheckFailure {
+			st.Phase = PhaseUnhealthy
+		}
+	}
+	return st, nil
+}

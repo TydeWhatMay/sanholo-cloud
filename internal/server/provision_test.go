@@ -31,13 +31,14 @@ func newProvEnv(t *testing.T) *provEnv {
 		t.Fatal(err)
 	}
 	prov, err := provision.New(g.pool, nc, provision.Options{
-		Settings: nomadfake.Settings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond,
+		Settings: nomadfake.Settings(), Volume: nomadfake.VolumeSettings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(prov.Close)
 	g.admin.SetProvisioner(prov)
+	g.conn.SetProvisioner(prov)
 	g.app = New(g.pool, WithApp(&App{Auth: g.svc, Admin: g.admin, Connect: g.conn, Provision: prov}))
 	return &provEnv{g, fake, prov}
 }
@@ -174,7 +175,11 @@ func TestRetryOnlyForAFailedBot(t *testing.T) {
 		t.Errorf("retry with no instance = %d, want 409", r.status)
 	}
 	connectGame(t, c, tokenA)
+	// The start registers the job in the background after writing the row;
+	// count only once that registration has happened, or it lands between
+	// the two reads and looks like the refused retry's.
 	eventually(t, "the instance", func() bool { return p.instance(t, tenant) != nil })
+	eventually(t, "the first registration", func() bool { return p.fake.Count("POST", "/v1/jobs") >= 1 })
 	before := p.fake.Count("POST", "/v1/jobs")
 	if r := c.post("/account/instance/retry", nil); r.status != 409 {
 		t.Errorf("retry of a starting bot = %d, want 409", r.status)
@@ -258,5 +263,38 @@ func TestAdminRestartWhenNomadFails(t *testing.T) {
 	}
 	if got := p.instance(t, tenant).State; got != provision.StateFailed {
 		t.Errorf("state = %q, want failed", got)
+	}
+}
+
+// A deployment that failed leaves the same job in Nomad. Retrying must
+// register it again; a plain start sees the same spec and does nothing.
+func TestRetryOfAFailedDeploymentRegistersTheJobAgain(t *testing.T) {
+	p := newProvEnv(t)
+	c, tenant := p.user(t, "ann@example.org")
+	job := "sanholo-tenant-" + tenant
+	connectGame(t, c, tokenA)
+	eventually(t, "the job", func() bool { e, _ := p.fake.Has(job); return e })
+	p.fake.SetPhase(job, nomadfake.Failed) // the registration worked; the deployment failed
+	p.prov.Wait()                          // the start's follow-up ends on the failure
+	if got := p.instance(t, tenant); got.State != provision.StateFailed || got.FailureReason != provision.ReasonDeployFailed {
+		t.Fatalf("instance = %+v, want a failed deployment", got)
+	}
+	before := p.fake.Count("POST", "/v1/jobs")
+	if r := c.post("/account/instance/retry", nil); r.status != 303 {
+		t.Fatalf("retry: %d %s", r.status, r.body)
+	}
+	eventually(t, "the second registration", func() bool { return p.fake.Count("POST", "/v1/jobs") > before })
+	p.fake.SetPhase(job, nomadfake.Failed) // the new version fails again; the follow-up ends
+	p.prov.Wait()
+	if got := p.fake.Count("POST", "/v1/jobs"); got != before+1 {
+		t.Errorf("registrations %d -> %d: the retry did not register the job again", before, got)
+	}
+	// On real Nomad an identical spec is only a new evaluation: the retry must
+	// change the job meta so a new version replaces the failed allocation.
+	if p.fake.Version(job) != 2 {
+		t.Errorf("job version = %d, want 2 (a new version)", p.fake.Version(job))
+	}
+	if m, _ := p.fake.Job(job)["Meta"].(map[string]any); m["sanholo.restart"] != "1" {
+		t.Errorf("job meta = %v, want sanholo.restart=1", m)
 	}
 }

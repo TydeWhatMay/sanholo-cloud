@@ -190,13 +190,35 @@ func decodeMe(body []byte) (Account, error) {
 		return Account{}, ErrNoReplicant
 	}
 	reps := r.Replicants
-	// Earliest first; the code breaks ties so the choice is deterministic.
-	sort.SliceStable(reps, func(i, j int) bool {
-		if reps[i].CreatedAt != reps[j].CreatedAt {
-			return reps[i].CreatedAt < reps[j].CreatedAt
+	// Earliest first, by the time the replicant was created, not by the text
+	// of it: RFC 3339 allows any fractional precision and any offset, and
+	// "2026-01-01T00:00:00.5Z" sorts before "2026-01-01T00:00:00Z" as text.
+	// A time that cannot be read sorts after every readable one. The code
+	// breaks ties so the choice is deterministic.
+	type keyed struct {
+		rep replicantSummary
+		at  time.Time
+		ok  bool
+	}
+	ks := make([]keyed, len(reps))
+	for i, rp := range reps {
+		at, err := time.Parse(time.RFC3339, rp.CreatedAt)
+		ks[i] = keyed{rp, at, err == nil}
+	}
+	sort.SliceStable(ks, func(i, j int) bool {
+		a, b := ks[i], ks[j]
+		switch {
+		case a.ok != b.ok:
+			return a.ok
+		case a.ok && !a.at.Equal(b.at):
+			return a.at.Before(b.at)
 		}
-		return reps[i].Code < reps[j].Code
+		return a.rep.Code < b.rep.Code
 	})
+	reps = reps[:0]
+	for _, k := range ks {
+		reps = append(reps, k.rep)
+	}
 	first := reps[0]
 	if !codeRE.MatchString(first.Code) || !displayable(first.Name) {
 		return Account{}, ErrProtocol

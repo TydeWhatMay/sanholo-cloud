@@ -101,6 +101,13 @@ type Nomad struct {
 	// the new version (default: Timeout).
 	RolloutBatch   int
 	RolloutTimeout time.Duration
+	// CanarySoak and BatchSoak are how long an updated tenant is watched
+	// (live checks, restarts, allocation) after its deployment turned
+	// healthy, for the canary and for every other batch. Zero disables.
+	CanarySoak time.Duration
+	BatchSoak  time.Duration
+	// Volume are the settings of each tenant's dynamic host volume.
+	Volume nomad.VolumeSettings
 }
 
 // Enabled reports whether tenant jobs will be registered.
@@ -336,14 +343,17 @@ func qmSettings(getenv func(string) string, production bool) (QM, error) {
 //	SANHOLO_IMAGE_VERSION, SANHOLO_IMAGE_REPO, TENANT_PROXY_PUBLIC_KEYS or
 //	TENANT_PROXY_PUBLIC_KEYS_FILE, TENANT_DOMAIN, TENANT_ALERT_URL,
 //	VAPID_PUBLIC_KEY, TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT,
-//	ROLLOUT_BATCH_SIZE (default 5), ROLLOUT_HEALTH_TIMEOUT (default PROVISION_TIMEOUT).
+//	ROLLOUT_BATCH_SIZE (default 5), ROLLOUT_HEALTH_TIMEOUT (default PROVISION_TIMEOUT),
+//	ROLLOUT_CANARY_SOAK (default 1h), ROLLOUT_BATCH_SOAK (default 10m; 0 turns
+//	a soak off), TENANT_VOLUME_SIZE_MB (default 1024), TENANT_VOLUME_NODE_POOL,
+//	TENANT_VOLUME_CONSTRAINT (${attribute}=value).
 func nomadSettings(getenv func(string) string, appBase, qmAddr string, production bool, key ed25519.PrivateKey) (Nomad, error) {
 	n := Nomad{Client: nomad.Config{
 		Addr: getenv("NOMAD_ADDR"), Token: getenv("NOMAD_TOKEN"), TokenFile: getenv("NOMAD_TOKEN_FILE"),
 		Namespace: getenv("NOMAD_NAMESPACE"), Region: getenv("NOMAD_REGION"),
 	}}
 	if n.Client.Addr == "" {
-		for _, name := range []string{"NOMAD_TOKEN", "NOMAD_TOKEN_FILE", "NOMAD_NAMESPACE", "NOMAD_REGION", "NOMAD_DATACENTERS", "SANHOLO_IMAGE_VERSION", "ROLLOUT_BATCH_SIZE", "ROLLOUT_HEALTH_TIMEOUT"} {
+		for _, name := range []string{"NOMAD_TOKEN", "NOMAD_TOKEN_FILE", "NOMAD_NAMESPACE", "NOMAD_REGION", "NOMAD_DATACENTERS", "SANHOLO_IMAGE_VERSION", "ROLLOUT_BATCH_SIZE", "ROLLOUT_HEALTH_TIMEOUT", "ROLLOUT_CANARY_SOAK", "ROLLOUT_BATCH_SOAK", "TENANT_VOLUME_SIZE_MB", "TENANT_VOLUME_NODE_POOL", "TENANT_VOLUME_CONSTRAINT"} {
 			if getenv(name) != "" {
 				return Nomad{}, fmt.Errorf("%s is set but NOMAD_ADDR is not", name)
 			}
@@ -424,6 +434,34 @@ func nomadSettings(getenv func(string) string, appBase, qmAddr string, productio
 			errs = append(errs, errors.New("ROLLOUT_HEALTH_TIMEOUT: want a duration from 1m to 6h"))
 		}
 		n.RolloutTimeout = d
+	}
+	n.CanarySoak, n.BatchSoak = time.Hour, 10*time.Minute
+	for _, p := range []struct {
+		name string
+		dst  *time.Duration
+	}{{"ROLLOUT_CANARY_SOAK", &n.CanarySoak}, {"ROLLOUT_BATCH_SOAK", &n.BatchSoak}} {
+		if v := getenv(p.name); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil || d < 0 || d > 24*time.Hour {
+				errs = append(errs, fmt.Errorf("%s: want a duration from 0 to 24h", p.name))
+				continue
+			}
+			*p.dst = d
+		}
+	}
+	n.Volume = nomad.VolumeSettings{CapacityMB: 1024, NodePool: getenv("TENANT_VOLUME_NODE_POOL"), Owner: nomad.VolumeOwner}
+	if err := positiveInt(getenv, "TENANT_VOLUME_SIZE_MB", &n.Volume.CapacityMB); err != nil {
+		errs = append(errs, err)
+	}
+	if v := getenv("TENANT_VOLUME_CONSTRAINT"); v != "" {
+		attr, val, ok := strings.Cut(v, "=")
+		if !ok {
+			errs = append(errs, errors.New("TENANT_VOLUME_CONSTRAINT: want ${attribute}=value"))
+		}
+		n.Volume.ConstraintAttr, n.Volume.ConstraintValue = attr, val
+	}
+	if err := n.Volume.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("tenant volume settings: %w", err))
 	}
 	// Validate only once every input is in: a missing key would repeat as a
 	// second error.

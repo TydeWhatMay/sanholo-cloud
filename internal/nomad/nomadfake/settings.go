@@ -48,3 +48,8 @@ func VAPIDKey() string {
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
+
+// VolumeSettings returns valid volume settings for tests.
+func VolumeSettings() nomad.VolumeSettings {
+	return nomad.VolumeSettings{CapacityMB: 1024, Owner: nomad.VolumeOwner}
+}

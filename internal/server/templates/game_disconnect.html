@@ -1,0 +1,9 @@
+<h1>Disconnect your game account</h1>
+<p>The replicant is <strong>{{.Name}}</strong> ({{.Code}}).</p>
+<p>Disconnecting stops your bot. It deletes your token from the secrets store, deletes your bot's data volume and removes the game account from SanHolo. Your SanHolo account stays.</p>
+<p>The deletion is permanent. To play again, connect a game account again.</p>
+<form method="post" action="/account/game/disconnect">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><button type="submit">Disconnect and delete</button></p>
+</form>
+<p><a href="/account">Cancel</a></p>

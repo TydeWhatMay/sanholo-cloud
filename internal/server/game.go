@@ -202,6 +202,71 @@ func (a *App) instanceRetry(c *fiber.Ctx) error {
 	if inst == nil || inst.State != provision.StateFailed {
 		return a.message(c, fiber.StatusConflict, "No change made", "Your bot is not in a failed state.")
 	}
-	a.Provision.Trigger(ses.TenantID)
+	// A failed deployment leaves the same job in Nomad, and registering an
+	// unchanged job is skipped, so a plain start would do nothing: the retry
+	// takes the restart path, which registers the job again.
+	a.Provision.TriggerRestart(ses.TenantID)
 	return c.Redirect("/account", fiber.StatusSeeOther)
+}
+
+const gameDisconnectLimit = 10
+
+// gameDisconnectConfirm is the confirmation step: it spends nothing (a GET
+// may be prefetched), it says what disconnecting does, and its form is what
+// disconnects.
+func (a *App) gameDisconnectConfirm(c *fiber.Ctx) error {
+	if c.Method() == fiber.MethodHead || isPrefetch(c) {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+	ses := c.Locals("session").(auth.Session)
+	g, err := a.Connect.Get(c.UserContext(), ses.TenantID)
+	if err != nil {
+		return a.serverError(c)
+	}
+	if g == nil {
+		return a.message(c, fiber.StatusConflict, "No change made", "No game account is connected.")
+	}
+	return a.render(c, fiber.StatusOK, "game_disconnect", "Disconnect your game account", fiber.Map{
+		"Name": g.ReplicantName, "Code": g.ReplicantCode,
+	})
+}
+
+// gameDisconnect stops the bot and removes the game account from SanHolo.
+func (a *App) gameDisconnect(c *fiber.Ctx) error {
+	ses := c.Locals("session").(auth.Session)
+	ok, err := a.allow(c, "game:disconnect:account:"+ses.AccountID, gameDisconnectLimit)
+	if err != nil {
+		return a.serverError(c)
+	}
+	if !ok {
+		return a.message(c, fiber.StatusTooManyRequests, "Too many requests", "Wait an hour before trying again.")
+	}
+	res, err := a.Connect.Disconnect(c.UserContext(), ses.AccountID, ses.TenantID)
+	switch {
+	case errors.Is(err, connect.ErrNotConnected):
+		return a.message(c, fiber.StatusConflict, "No change made", "No game account is connected.")
+	case errors.Is(err, connect.ErrStopFailed):
+		return a.message(c, fiber.StatusBadGateway, "Not disconnected",
+			"SanHolo could not stop your bot. Nothing was changed. Try again in a few minutes.")
+	case err != nil:
+		return a.serverError(c)
+	}
+	lines := []string{"Your game account is disconnected and your bot is stopped. Your SanHolo account is unchanged."}
+	if res.SecretPending || res.VolumePending {
+		what := []string{}
+		if res.SecretPending {
+			what = append(what, "your token in the secrets store")
+		}
+		if res.VolumePending {
+			what = append(what, "your bot's data volume")
+		}
+		lines = append(lines, "Deleting "+strings.Join(what, " and ")+" is not finished yet. SanHolo has recorded it and retries until it succeeds.")
+	} else {
+		lines = append(lines, "Your token and your bot's data volume are deleted.")
+	}
+	return a.render(c, fiber.StatusOK, "message", "Game account disconnected", fiber.Map{
+		"Heading": "Game account disconnected",
+		"Lines":   lines,
+		"Link":    "/account", "LinkText": "Back to your account",
+	})
 }

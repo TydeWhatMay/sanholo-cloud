@@ -16,6 +16,9 @@ var (
 	ErrReleaseInvalid = updater.ErrInvalid
 	// ErrRolloutActive means another rollout is rolling or halted.
 	ErrRolloutActive = updater.ErrRolloutActive
+	// ErrCanaryUnhealthy means the canary tenant failed its health check in
+	// the last hour.
+	ErrCanaryUnhealthy = updater.ErrCanaryUnhealthy
 )
 
 // SetUpdater gives the service the updater that the release actions drive.

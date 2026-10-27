@@ -49,11 +49,23 @@ func (s *Service) Update(ctx context.Context, tenantID, version, digest string) 
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
-	job, err := nomad.BuildJobPinned(s.set, tenantID, v, digest)
-	if err != nil {
+	if _, err := nomad.BuildJobPinned(s.set, tenantID, v, digest); err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
+	unlock, err := s.lockTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.updateLocked(ctx, tenantID, v, digest)
+}
+
+// updateLocked is Update for a caller that holds the tenant's lock. It renders
+// the job itself, with the instance's stored restart counter, so an update or
+// a revert never registers the old counter over a bump.
+func (s *Service) updateLocked(ctx context.Context, tenantID, v, digest string) error {
 	var status string
+	var err error
 	err = s.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1`, tenantID).Scan(&status)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -85,12 +97,11 @@ func (s *Service) Update(ctx context.Context, tenantID, version, digest string) 
 			return ErrNotAllowed
 		}
 	}
-	if err := s.ensureJob(ctx, job, false); err != nil {
-		s.fail(ctx, tenantID, reasonFor(err))
-		s.log.Warn("provision: could not register the update", "tenant", tenantID, "error", err)
-		return fmt.Errorf("provision: register: %w", err)
+	job, err := nomad.BuildJobRestart(s.set, tenantID, v, digest, cur.RestartSeq)
+	if err != nil {
+		return fmt.Errorf("provision: %w", err)
 	}
-	return nil
+	return s.register(ctx, tenantID, job, false, "could not register the update")
 }
 
 // UpdateState is the updater's reading of a tenant's job against the spec it

@@ -54,7 +54,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.opt = provision.Options{Settings: nomadfake.Settings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond, Logger: log}
+	e.opt = provision.Options{Settings: nomadfake.Settings(), Volume: nomadfake.VolumeSettings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond, Logger: log}
 	e.svc = e.service(t, e.opt)
 	return e
 }
@@ -326,7 +326,9 @@ func TestStartFailuresAreRecordedWithFixedReasons(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
 			e.tenant(t, "acme", "active", true)
-			e.fake.Override(func(r nomadfake.Request) (int, string, bool) { return tc.status, leak, true })
+			e.fake.Override(func(r nomadfake.Request) (int, string, bool) {
+				return tc.status, leak, r.Method == "POST" && r.Path == "/v1/jobs"
+			})
 			err := e.svc.Start(context.Background(), "acme")
 			if err == nil {
 				t.Fatal("Start succeeded against a failing Nomad")
@@ -429,10 +431,11 @@ func TestReconcile(t *testing.T) {
 	}
 	// "pend": became healthy while no one watched (control plane restart).
 	e.fake.SetPhase(job("pend"), nomadfake.Healthy)
-	// "run": healthy, then turns unhealthy.
+	// "run": healthy, then its live check starts failing. Nomad's deployment
+	// verdict stays healthy for good; only the live check shows it.
 	e.fake.SetPhase(job("run"), nomadfake.Healthy)
 	e.svc.Reconcile(ctx)
-	e.fake.SetPhase(job("run"), nomadfake.Unhealthy)
+	e.fake.SetCheck(job("run"), "failure")
 	// "fail": failed, then Nomad recovers it.
 	e.fake.SetPhase(job("fail"), nomadfake.Failed)
 	e.svc.Reconcile(ctx)
@@ -557,6 +560,7 @@ func TestRestartOfAFailedJobRegistersAgain(t *testing.T) {
 	if err := e.svc.Restart(ctx, "acme"); err != nil {
 		t.Fatal(err)
 	}
+	e.fake.SetPhase(job("acme"), nomadfake.Failed) // the new version fails too; the follow-up ends
 	e.svc.Wait()
 	if e.posts() != before+1 {
 		t.Errorf("registrations %d -> %d, want one more", before, e.posts())
@@ -640,6 +644,7 @@ func TestNewValidatesWhenEnabled(t *testing.T) {
 		"latest":             bad(func(o *provision.Options) { o.Version = "latest" }),
 		"wrong namespace":    bad(func(o *provision.Options) { o.Settings.Namespace = "default" }),
 		"invalid settings":   bad(func(o *provision.Options) { o.Settings.MemoryMB = 1 }),
+		"invalid volume":     bad(func(o *provision.Options) { o.Volume.CapacityMB = 0 }),
 		"http qm":            bad(func(o *provision.Options) { o.Settings.QMAddr = "http://qm.example.org" }),
 		"no proxy key":       bad(func(o *provision.Options) { o.Settings.ProxyPublicKeys = "" }),
 		"zero-value options": {},
@@ -772,6 +777,7 @@ func TestUpstream(t *testing.T) {
 		t.Fatalf("healthy: %q, %v", addr, err)
 	}
 	// Unhealthy but running is still reachable: the Bridge may be up.
+	e.fake.ReplaceAlloc(job("acme"))
 	e.fake.SetPhase(job("acme"), nomadfake.Unhealthy)
 	if addr, err := e.svc.Upstream(ctx, "acme"); err != nil || addr == "" {
 		t.Errorf("unhealthy: %q, %v", addr, err)

@@ -10,7 +10,16 @@
 //     allocation; registering the same spec is a no-op on allocations;
 //   - allocation health is scripted: SetPhase, or HealthyAfter polls of the
 //     allocations list, which models an instance that warms up;
-//   - DELETE stops the job, with purge=true it forgets it.
+//   - DELETE stops the job, with purge=true it forgets it;
+//   - the deployment's health verdict is sticky, as in Nomad: decided once per
+//     allocation, never changed. What changes later is modelled apart: live
+//     service checks (SetCheck), task restarts (BumpRestarts) and a
+//     replacement allocation (ReplaceAlloc);
+//   - a registered job is validated with the rules of real Nomad that the
+//     tenant job can break (identity, service, task and job names), checked
+//     against a Nomad 2.0.6 dev agent (POST /v1/validate/job);
+//   - dynamic host volumes (create, list by name, delete) with the shapes of
+//     Nomad 2.0.6, and a job whose volume does not exist gets no allocation.
 package nomadfake
 
 import (
@@ -19,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +64,13 @@ type job struct {
 	allocSeq    int
 	allocID     string
 	restarts    int
+	// verdict is the deployment's health verdict on the current allocation,
+	// set once.
+	verdict Phase
+	// check scripts the live check status ("" derives it from the phase).
+	check string
+	// taskRestarts is the task restart count of the current allocation.
+	taskRestarts int
 	// old are allocations of earlier versions, still listed (and healthy)
 	// until the job is stopped, as Nomad keeps them while it replaces them.
 	old []map[string]any
@@ -61,11 +78,14 @@ type job struct {
 
 // Fake is the server and its state.
 type Fake struct {
+	t         *testing.T
 	srv       *httptest.Server
 	token     string
 	namespace string
 
 	mu       sync.Mutex
+	volumes  map[string]*volume
+	volSeq   int
 	jobs     map[string]*job
 	reqs     []Request
 	index    uint64
@@ -97,7 +117,7 @@ func (f *Fake) FailImage(substr string, revert bool) {
 // New starts a fake that accepts token in namespace.
 func New(t *testing.T, token, namespace string) *Fake {
 	t.Helper()
-	f := &Fake{token: token, namespace: namespace, jobs: map[string]*job{}}
+	f := &Fake{t: t, token: token, namespace: namespace, jobs: map[string]*job{}, volumes: map[string]*volume{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -138,7 +158,57 @@ func (f *Fake) SetPhase(jobID string, p Phase) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if j := f.jobs[jobID]; j != nil {
-		j.phase = p
+		f.setPhase(j, p)
+	}
+}
+
+// setPhase applies a scripted phase. Nomad decides an allocation's
+// deployment health once; flipping a decided verdict is a test bug, so it
+// fails the test instead of silently modelling something Nomad never does.
+func (f *Fake) setPhase(j *job, p Phase) {
+	if (p == Healthy || p == Unhealthy) && j.verdict != "" && j.verdict != p {
+		f.t.Helper()
+		f.t.Errorf("nomadfake: the deployment health of the allocation is already %q; Nomad decides it once. Model a later change with SetCheck, BumpRestarts or ReplaceAlloc", j.verdict)
+		return
+	}
+	if p == Healthy || p == Unhealthy {
+		j.verdict = p
+	}
+	if p == Pending || p == Failed {
+		j.verdict = ""
+	}
+	j.phase = p
+}
+
+// SetCheck scripts the live status of the job's service check: "success",
+// "failure" or "pending". An empty status derives it from the allocation.
+func (f *Fake) SetCheck(jobID, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j := f.jobs[jobID]; j != nil {
+		j.check = status
+	}
+}
+
+// BumpRestarts adds a task restart to the current allocation, as Nomad's
+// restart policy or check_restart would.
+func (f *Fake) BumpRestarts(jobID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j := f.jobs[jobID]; j != nil {
+		j.taskRestarts++
+	}
+}
+
+// ReplaceAlloc replaces the job's allocation with a new one of the same job
+// version, as a reschedule does: no deployment verdict yet, no restarts.
+func (f *Fake) ReplaceAlloc(jobID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j := f.jobs[jobID]; j != nil {
+		j.allocSeq++
+		j.allocID = fmt.Sprintf("a110c%03d-0000-0000-0000-%012d", j.allocSeq, len(jobID))
+		j.verdict, j.check, j.taskRestarts, j.phase, j.polls = "", "", 0, Pending, 0
 	}
 }
 
@@ -243,6 +313,14 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.deployment(w, parts[2])
 	case len(parts) == 5 && parts[1] == "client" && parts[2] == "allocation" && parts[4] == "restart" && r.Method == http.MethodPut:
 		f.restart(w, parts[3])
+	case len(parts) == 4 && parts[1] == "allocation" && parts[3] == "checks" && r.Method == http.MethodGet:
+		f.checks(w, parts[2])
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/volumes":
+		f.listVolumes(w, r)
+	case r.Method == http.MethodPut && r.URL.Path == "/v1/volume/host/create":
+		f.createVolume(w, body)
+	case r.Method == http.MethodDelete && len(parts) == 5 && parts[1] == "volume" && parts[2] == "host" && parts[4] == "delete":
+		f.deleteVolume(w, parts[3])
 	default:
 		http.NotFound(w, r)
 	}
@@ -262,6 +340,10 @@ func (f *Fake) register(w http.ResponseWriter, body []byte) {
 	ns, _ := p.Job["Namespace"].(string)
 	if id == "" || ns != f.namespace {
 		http.Error(w, "job namespace does not match", http.StatusBadRequest)
+		return
+	}
+	if msgs := validateJob(p.Job); len(msgs) > 0 {
+		http.Error(w, strings.Join(msgs, "; "), http.StatusBadRequest)
 		return
 	}
 	cur := f.jobs[id]
@@ -289,9 +371,9 @@ func (f *Fake) register(w http.ResponseWriter, body []byte) {
 			})
 		}
 		cur.version++
-		cur.phase = Pending
+		cur.phase, cur.verdict, cur.check, cur.taskRestarts = Pending, "", "", 0
 		if f.OnRegister != "" {
-			cur.phase = f.OnRegister
+			f.setPhase(cur, f.OnRegister)
 		}
 		cur.polls = 0
 		cur.allocSeq++
@@ -300,7 +382,7 @@ func (f *Fake) register(w http.ResponseWriter, body []byte) {
 	prevRaw, prevSpec := cur.raw, cur.spec
 	cur.spec, cur.raw, cur.stop, cur.modifyIndex = spec, p.Job, false, f.index
 	if f.failImage != "" && strings.Contains(imageOf(p.Job), f.failImage) {
-		cur.phase = Failed
+		cur.phase, cur.verdict = Failed, ""
 		if f.failRevert && prevRaw != nil && prevSpec != spec {
 			// The failed deployment's allocation is replaced by one of the
 			// previous document, registered as a new job version.
@@ -308,6 +390,7 @@ func (f *Fake) register(w http.ResponseWriter, body []byte) {
 			cur.allocSeq++
 			cur.allocID = fmt.Sprintf("a110c%03d-0000-0000-0000-%012d", cur.allocSeq, len(id))
 			cur.spec, cur.raw, cur.phase, cur.polls = prevSpec, prevRaw, Healthy, 0
+			cur.verdict, cur.check, cur.taskRestarts = Healthy, "", 0
 		}
 	}
 	writeJSON(w, map[string]any{"EvalID": "ev1", "JobModifyIndex": cur.modifyIndex, "Warnings": ""})
@@ -360,9 +443,14 @@ func (f *Fake) allocations(w http.ResponseWriter, id string) {
 	}
 	j.polls++
 	if j.phase == Pending && f.HealthyAfter > 0 && j.polls >= f.HealthyAfter {
-		j.phase = Healthy
+		f.setPhase(j, Healthy)
+	}
+	if f.blocked(j) {
+		writeJSON(w, []any{})
+		return
 	}
 	a := map[string]any{"ID": j.allocID, "JobVersion": j.version, "DesiredStatus": "run", "ClientStatus": "pending"}
+	a["TaskStates"] = map[string]any{"bot": map[string]any{"Restarts": j.taskRestarts, "State": "running"}}
 	switch {
 	case j.stop:
 		a["DesiredStatus"], a["ClientStatus"] = "stop", "complete"
@@ -420,4 +508,238 @@ func mustJSON(v any) []byte {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// blocked: the job's volume does not exist, so Nomad cannot place the
+// allocation and the evaluation stays blocked: no allocation is listed.
+func (f *Fake) blocked(j *job) bool {
+	if j.stop {
+		return false
+	}
+	return f.missingVolume(j.raw) != ""
+}
+
+func (f *Fake) missingVolume(raw map[string]any) string {
+	groups, _ := raw["TaskGroups"].([]any)
+	for _, g := range groups {
+		vols, _ := g.(map[string]any)["Volumes"].(map[string]any)
+		for _, v := range vols {
+			vm, _ := v.(map[string]any)
+			if vm["Type"] == "host" {
+				src, _ := vm["Source"].(string)
+				if f.volumes[src] == nil {
+					return src
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (f *Fake) checks(w http.ResponseWriter, alloc string) {
+	for _, j := range f.jobs {
+		if j.allocID != alloc {
+			continue
+		}
+		status := j.check
+		if status == "" {
+			status = "pending"
+			if (j.phase == Healthy || j.phase == Unhealthy) && !j.stop {
+				status = "success"
+			}
+		}
+		writeJSON(w, map[string]any{"chk1": map[string]any{
+			"Check": "healthz", "Service": "sanholo-bot", "Group": "bot", "Mode": "healthiness",
+			"Status": status, "ID": "chk1", "Output": "nomad: http", "StatusCode": 200, "Timestamp": 1,
+		}})
+		return
+	}
+	http.Error(w, "Unknown allocation \""+alloc+"\"", http.StatusNotFound)
+}
+
+var (
+	identityNameRE = regexp.MustCompile(`^[a-zA-Z0-9-_]{1,128}$`)
+	serviceNameRE  = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$`)
+)
+
+// validateJob applies the rules of Nomad's job validation (verified against
+// POST /v1/validate/job on Nomad 2.0.6) that a tenant job can break.
+func validateJob(job map[string]any) []string {
+	var out []string
+	id, _ := job["ID"].(string)
+	name, _ := job["Name"].(string)
+	switch {
+	case id == "":
+		out = append(out, "Missing job ID")
+	case strings.ContainsAny(id, " \t\r\n\x00"):
+		out = append(out, "Job ID contains a space or a null character")
+	}
+	if name == "" {
+		out = append(out, "Missing job name")
+	}
+	groups, _ := job["TaskGroups"].([]any)
+	if len(groups) == 0 {
+		out = append(out, "Missing job task groups")
+	}
+	for _, g := range groups {
+		gm, _ := g.(map[string]any)
+		if n, _ := gm["Name"].(string); n == "" {
+			out = append(out, "Missing task group name")
+		}
+		svcs, _ := gm["Services"].([]any)
+		for _, sv := range svcs {
+			n, _ := sv.(map[string]any)["Name"].(string)
+			if !serviceNameRE.MatchString(n) {
+				out = append(out, fmt.Sprintf("Service name %q must be a lower-case DNS label of at most 63 characters", n))
+			}
+		}
+		tasks, _ := gm["Tasks"].([]any)
+		for _, t := range tasks {
+			tm, _ := t.(map[string]any)
+			tn, _ := tm["Name"].(string)
+			switch {
+			case tn == "":
+				out = append(out, "Missing task name")
+			case strings.ContainsAny(tn, "/\\\x00"):
+				out = append(out, "Task name cannot include slashes or null characters")
+			}
+			ids, _ := tm["Identities"].([]any)
+			for _, i := range ids {
+				in, _ := i.(map[string]any)["Name"].(string)
+				if !identityNameRE.MatchString(in) {
+					out = append(out, fmt.Sprintf("invalid identity name %q. Must match regex ^[a-zA-Z0-9-_]{1,128}$", in))
+				}
+			}
+		}
+	}
+	return out
+}
+
+type volume struct {
+	id, name string
+	spec     map[string]any
+}
+
+// AddVolume creates a volume without a request (test setup).
+func (f *Fake) AddVolume(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.volSeq++
+	f.volumes[name] = &volume{id: fmt.Sprintf("70100000-0000-0000-0000-%012d", f.volSeq), name: name, spec: map[string]any{}}
+}
+
+// RemoveVolume deletes a volume without a request (test setup).
+func (f *Fake) RemoveVolume(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.volumes, name)
+}
+
+// Volumes lists the names of the dynamic host volumes.
+func (f *Fake) Volumes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for n := range f.volumes {
+		out = append(out, n)
+	}
+	return out
+}
+
+// VolumeSpec is the create request of a volume, nil when there is none.
+func (f *Fake) VolumeSpec(name string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if v := f.volumes[name]; v != nil {
+		return v.spec
+	}
+	return nil
+}
+
+var volumeFilterRE = regexp.MustCompile(`^Name == "(.*)"$`)
+
+func (f *Fake) listVolumes(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("type") != "host" {
+		http.Error(w, "volume type required", http.StatusBadRequest)
+		return
+	}
+	want := ""
+	if flt := r.URL.Query().Get("filter"); flt != "" {
+		m := volumeFilterRE.FindStringSubmatch(flt)
+		if m == nil {
+			http.Error(w, "unsupported filter", http.StatusBadRequest)
+			return
+		}
+		want = m[1]
+	}
+	out := []any{}
+	for n, v := range f.volumes {
+		if want == "" || n == want {
+			out = append(out, map[string]any{"ID": v.id, "Name": n, "Namespace": f.namespace, "PluginID": "mkdir", "State": "ready"})
+		}
+	}
+	writeJSON(w, out)
+}
+
+func (f *Fake) createVolume(w http.ResponseWriter, body []byte) {
+	var p struct {
+		Volume map[string]any `json:"Volume"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil || p.Volume == nil {
+		http.Error(w, "missing volume", http.StatusBadRequest)
+		return
+	}
+	v := p.Volume
+	name, _ := v["Name"].(string)
+	min, _ := v["RequestedCapacityMinBytes"].(float64)
+	max, _ := v["RequestedCapacityMaxBytes"].(float64)
+	caps, _ := v["RequestedCapabilities"].([]any)
+	switch {
+	case v["Namespace"] != f.namespace:
+		http.Error(w, "volume namespace does not match", http.StatusBadRequest)
+	case name == "" || v["PluginID"] != "mkdir":
+		http.Error(w, "volume validation failed: name and plugin are required", http.StatusInternalServerError)
+	case max < min || min <= 0:
+		http.Error(w, fmt.Sprintf("volume validation failed: capacity_max (%d) must be larger than capacity_min (%d)", int64(max), int64(min)), http.StatusInternalServerError)
+	case len(caps) == 0:
+		http.Error(w, "volume validation failed: must include at least one capability block", http.StatusInternalServerError)
+	case f.volumes[name] != nil:
+		http.Error(w, fmt.Sprintf("could not place volume %q: no node meets constraints: 1 nodes had existing volume", name), http.StatusInternalServerError)
+	default:
+		f.volSeq++
+		id := fmt.Sprintf("70100000-0000-0000-0000-%012d", f.volSeq)
+		f.volumes[name] = &volume{id: id, name: name, spec: v}
+		writeJSON(w, map[string]any{"Index": f.index, "Volume": map[string]any{"ID": id, "Name": name, "Namespace": f.namespace, "State": "pending"}, "Warnings": ""})
+	}
+}
+
+func (f *Fake) deleteVolume(w http.ResponseWriter, id string) {
+	for n, v := range f.volumes {
+		if v.id != id {
+			continue
+		}
+		for _, j := range f.jobs {
+			if !j.stop && j.raw != nil && f.usesVolume(j.raw, n) {
+				http.Error(w, "volume in use: an allocation still claims it", http.StatusInternalServerError)
+				return
+			}
+		}
+		delete(f.volumes, n)
+		writeJSON(w, map[string]any{"Index": f.index})
+		return
+	}
+	http.Error(w, "no such volume: "+id, http.StatusInternalServerError)
+}
+
+func (f *Fake) usesVolume(raw map[string]any, name string) bool {
+	groups, _ := raw["TaskGroups"].([]any)
+	for _, g := range groups {
+		vols, _ := g.(map[string]any)["Volumes"].(map[string]any)
+		for _, v := range vols {
+			if vm, _ := v.(map[string]any); vm["Source"] == name {
+				return true
+			}
+		}
+	}
+	return false
 }

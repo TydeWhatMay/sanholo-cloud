@@ -502,7 +502,7 @@ func (f *fixture) provisioned(t *testing.T, email string) (tenantID string, fake
 	if err != nil {
 		t.Fatal(err)
 	}
-	prov, err = provision.New(f.pool, nc, provision.Options{Settings: nomadfake.Settings(), Version: "0.7.1", Poll: 5 * time.Millisecond})
+	prov, err = provision.New(f.pool, nc, provision.Options{Settings: nomadfake.Settings(), Volume: nomadfake.VolumeSettings(), Version: "0.7.1", Poll: 5 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,5 +600,96 @@ func TestTenantsListIncludesTheInstance(t *testing.T) {
 				t.Errorf("unprovisioned tenant: %+v", tn)
 			}
 		}
+	}
+}
+
+// Suspension stops the tenant's bot (the job stays registered) and
+// reinstatement starts it again, each after the commit of the state and its
+// audit row.
+func TestSuspendStopsTheBotAndUnsuspendStartsIt(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	tenantID, fake, prov := f.provisioned(t, "user@example.org")
+	job := "sanholo-tenant-" + tenantID
+	if err := f.svc.Suspend(ctx, "op", tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if exists, stopped := fake.Has(job); !exists || !stopped {
+		t.Fatalf("job exists %v stopped %v after the suspension, want a stopped job that is kept", exists, stopped)
+	}
+	if fake.Count("DELETE", "/v1/job/"+job) != 1 || strings.Contains(lastDelete(fake), "purge=true") {
+		t.Errorf("the job must be stopped without purge: %q", lastDelete(fake))
+	}
+	inst, _ := prov.Get(ctx, tenantID)
+	if inst.State != provision.StateStopped {
+		t.Errorf("instance state = %q, want stopped", inst.State)
+	}
+	if n := f.count(t, `SELECT count(*) FROM audit_log WHERE action = 'tenant.suspend' AND target = $1`, "tenant:"+tenantID); n != 1 {
+		t.Errorf("%d audit rows", n)
+	}
+
+	fake.HealthyAfter = 1
+	if err := f.svc.Unsuspend(ctx, "op", tenantID); err != nil {
+		t.Fatal(err)
+	}
+	prov.Wait()
+	if _, stopped := fake.Has(job); stopped {
+		t.Error("the job is still stopped after the reinstatement")
+	}
+	if inst, _ = prov.Get(ctx, tenantID); inst.State != provision.StateRunning {
+		t.Errorf("instance after reinstatement = %+v, want running", inst)
+	}
+}
+
+func lastDelete(f *nomadfake.Fake) string {
+	last := ""
+	for _, r := range f.Requests() {
+		if r.Method == "DELETE" && strings.HasPrefix(r.Path, "/v1/job/") {
+			last = r.Path + "?" + r.Query
+		}
+	}
+	return last
+}
+
+func TestSuspendWhenNomadRefusesRecordsAFailure(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	tenantID, fake, prov := f.provisioned(t, "user@example.org")
+	fake.Override(func(r nomadfake.Request) (int, string, bool) { return 503, "", r.Method == "DELETE" })
+	if err := f.svc.Suspend(ctx, "op", tenantID); !errors.Is(err, ErrInstance) {
+		t.Fatalf("Suspend = %v, want ErrInstance", err)
+	}
+	if n := f.count(t, `SELECT count(*) FROM tenants WHERE id = $1 AND status = 'suspended'`, tenantID); n != 1 {
+		t.Error("the suspension was not kept although Nomad refused")
+	}
+	if n := f.count(t, `SELECT count(*) FROM audit_log WHERE action = 'tenant.suspend' AND target = $1`, "tenant:"+tenantID); n != 1 {
+		t.Error("no audit row for the suspension")
+	}
+	inst, _ := prov.Get(ctx, tenantID)
+	if inst.State != provision.StateFailed || inst.FailureReason != provision.ReasonStopFailed {
+		t.Errorf("instance = %+v, want failed with %q", inst, provision.ReasonStopFailed)
+	}
+}
+
+func TestUnsuspendWhenNomadRefusesLeavesAFailedInstance(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	tenantID, fake, prov := f.provisioned(t, "user@example.org")
+	if err := f.svc.Suspend(ctx, "op", tenantID); err != nil {
+		t.Fatal(err)
+	}
+	fake.Override(func(r nomadfake.Request) (int, string, bool) {
+		return 503, "", r.Method == "POST" && r.Path == "/v1/jobs"
+	})
+	if err := f.svc.Unsuspend(ctx, "op", tenantID); err != nil {
+		t.Fatalf("Unsuspend = %v: the state change is recorded whatever Nomad does", err)
+	}
+	prov.Wait()
+	inst, _ := prov.Get(ctx, tenantID)
+	if inst.State != provision.StateFailed {
+		t.Errorf("instance = %+v, want failed", inst)
+	}
+	if n := f.count(t, `SELECT count(*) FROM tenants WHERE id = $1 AND status IN ('pending', 'active')`, tenantID); n != 1 {
+		t.Error("the tenant is not reinstated")
 	}
 }

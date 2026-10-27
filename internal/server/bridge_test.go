@@ -835,3 +835,25 @@ func TestForwardedHostIsIgnoredForRouting(t *testing.T) {
 		t.Errorf("unknown host with a forged X-Forwarded-Host: %d, want 404", r.status)
 	}
 }
+
+// A tenant being deleted loses its Bridge exactly as a suspended one does:
+// the existing Bridge session answers 404 and nothing reaches the instance.
+func TestDeletingTenantIs404(t *testing.T) {
+	b := newBridgeEnv(t)
+	p := b.person(t, "ann@example.org")
+	b.enterOK(t, p)
+	if r := p.bridge.get("/", nil); r.status != 200 {
+		t.Fatalf("before deletion: %d", r.status)
+	}
+	if _, err := b.pool.Exec(context.Background(), `UPDATE tenants SET status = 'deleting' WHERE id = $1`, p.tenant); err != nil {
+		t.Fatal(err)
+	}
+	before := b.count()
+	r := p.bridge.get("/", nil)
+	if r.status != 404 || r.body != "not found" {
+		t.Errorf("deleting: %d %q, want 404", r.status, r.body)
+	}
+	if b.count() != before {
+		t.Error("a deleting tenant's request reached its Bridge")
+	}
+}

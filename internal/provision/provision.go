@@ -54,6 +54,11 @@ const (
 	ReasonTimeout      = "the bot did not become healthy in time"
 	ReasonDeployFailed = "Nomad reported that the deployment failed"
 	ReasonMissing      = "the job is missing from Nomad"
+	ReasonVolume       = "Nomad could not create the bot's data volume"
+	ReasonStopFailed   = "Nomad did not stop the bot"
+	ReasonSoakCheck    = "a health check failed after the update"
+	ReasonSoakRestart  = "the bot restarted after the update"
+	ReasonSoakReplaced = "Nomad replaced the bot's allocation after the update"
 )
 
 var (
@@ -84,8 +89,14 @@ type Options struct {
 	// healthy. Default 15 minutes.
 	Timeout time.Duration
 	// Poll is the interval between status reads. Default 5 seconds.
-	Poll   time.Duration
-	Logger *slog.Logger
+	Poll time.Duration
+	// Volume are the settings of each tenant's dynamic host volume.
+	Volume nomad.VolumeSettings
+	// DriftPerPass caps how many instances one reconcile pass re-registers
+	// because their job differs from the expected spec (a rotated proxy key
+	// touches every tenant; this spreads it out). Default 3.
+	DriftPerPass int
+	Logger       *slog.Logger
 }
 
 // Service provisions tenant jobs. A nil *Service is disabled.
@@ -93,6 +104,8 @@ type Service struct {
 	pool    *pgxpool.Pool
 	nomad   *nomad.Client
 	set     nomad.JobSettings
+	vol     nomad.VolumeSettings
+	drift   int
 	version string
 	timeout time.Duration
 	poll    time.Duration
@@ -105,18 +118,30 @@ type Service struct {
 
 	mu       sync.Mutex
 	inflight map[string]bool
-	closed   bool
+	// queued holds the tenants whose restart was asked for while a start was
+	// in flight; the start's goroutine runs it when it is done.
+	queued map[string]bool
+	closed bool
+
+	// lockSem bounds the tenants holding a lock connection at once, so the
+	// queries made under the lock always find a free connection.
+	lockSem chan struct{}
 }
 
 // New returns a Service. With a disabled Nomad client the service is
 // disabled and the options are not checked; otherwise the job settings and
 // version must be valid, so a mistake stops the process at start.
 func New(pool *pgxpool.Pool, nc *nomad.Client, opt Options) (*Service, error) {
-	s := &Service{pool: pool, nomad: nc, log: opt.Logger, now: time.Now, inflight: map[string]bool{}}
+	s := &Service{pool: pool, nomad: nc, log: opt.Logger, now: time.Now, inflight: map[string]bool{}, queued: map[string]bool{}}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	n := 1
+	if pool != nil {
+		n = max(1, int(pool.Config().MaxConns)/2)
+	}
+	s.lockSem = make(chan struct{}, n)
 	if !nc.Enabled() {
 		return s, nil
 	}
@@ -130,7 +155,14 @@ func New(pool *pgxpool.Pool, nc *nomad.Client, opt Options) (*Service, error) {
 	if _, err := nomad.BuildJob(opt.Settings, "check", v); err != nil {
 		return nil, fmt.Errorf("provision: %w", err)
 	}
-	s.set, s.version = opt.Settings, v
+	if err := opt.Volume.Validate(); err != nil {
+		return nil, fmt.Errorf("provision: %w", err)
+	}
+	s.set, s.version, s.vol = opt.Settings, v, opt.Volume
+	s.drift = opt.DriftPerPass
+	if s.drift <= 0 {
+		s.drift = 3
+	}
 	s.timeout, s.poll = opt.Timeout, opt.Poll
 	if s.timeout <= 0 {
 		s.timeout = 15 * time.Minute
@@ -172,20 +204,25 @@ type Instance struct {
 	JobID        string
 	ImageVersion string
 	// ImageDigest is the digest the job is pinned to, empty for the tag.
-	ImageDigest   string
-	State         string
-	Health        string
-	HealthAt      *time.Time
+	ImageDigest string
+	State       string
+	Health      string
+	HealthAt    *time.Time
+	// UnhealthyAt is the last time the instance was seen unhealthy.
+	UnhealthyAt   *time.Time
 	FailureReason string
 	RequestedAt   time.Time
 	UpdatedAt     time.Time
+	// RestartSeq counts restarts that registered the job again because no
+	// allocation was running; it is the job meta sanholo.restart.
+	RestartSeq int
 }
 
-const instanceCols = `tenant_id, job_id, image_version, image_digest, state, last_health, last_health_at, failure_reason, requested_at, updated_at`
+const instanceCols = `tenant_id, job_id, image_version, image_digest, state, last_health, last_health_at, last_unhealthy_at, failure_reason, requested_at, updated_at, restart_seq`
 
 func scanInstance(row pgx.Row) (*Instance, error) {
 	var i Instance
-	err := row.Scan(&i.TenantID, &i.JobID, &i.ImageVersion, &i.ImageDigest, &i.State, &i.Health, &i.HealthAt, &i.FailureReason, &i.RequestedAt, &i.UpdatedAt)
+	err := row.Scan(&i.TenantID, &i.JobID, &i.ImageVersion, &i.ImageDigest, &i.State, &i.Health, &i.HealthAt, &i.UnhealthyAt, &i.FailureReason, &i.RequestedAt, &i.UpdatedAt, &i.RestartSeq)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -223,6 +260,16 @@ func (s *Service) start(ctx context.Context, tenantID string, force bool) error 
 	if !tenant.Valid(tenantID) {
 		return ErrNotFound
 	}
+	unlock, err := s.lockTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.startLocked(ctx, tenantID, force)
+}
+
+// startLocked is start for a caller that holds the tenant's lock.
+func (s *Service) startLocked(ctx context.Context, tenantID string, force bool) error {
 	var status string
 	var hasGame bool
 	err := s.pool.QueryRow(ctx, `
@@ -255,7 +302,11 @@ func (s *Service) start(ctx context.Context, tenantID string, force bool) error 
 	case cur != nil:
 		version, digest = cur.ImageVersion, cur.ImageDigest
 	}
-	job, err := nomad.BuildJobPinned(s.set, tenantID, version, digest)
+	restartSeq := 0
+	if cur != nil {
+		restartSeq = cur.RestartSeq
+	}
+	job, err := nomad.BuildJobRestart(s.set, tenantID, version, digest, restartSeq)
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
@@ -273,12 +324,62 @@ func (s *Service) start(ctx context.Context, tenantID string, force bool) error 
 		tenantID, job.ID, version, now, digest); err != nil {
 		return fmt.Errorf("provision: record instance: %w", err)
 	}
+	return s.register(ctx, tenantID, job, force, "could not register the job")
+}
+
+// errVolume marks a failure to create the tenant's volume.
+var errVolume = errors.New("data volume")
+
+// register creates the tenant's volume if it is missing, then registers the
+// job. The volume comes first: a job whose volume does not exist is accepted
+// by Nomad but never placed. Any failure is recorded on the instance.
+func (s *Service) register(ctx context.Context, tenantID string, job nomad.Job, force bool, what string) error {
+	if _, err := s.nomad.EnsureHostVolume(ctx, tenantID, s.vol); err != nil {
+		err = fmt.Errorf("%w: %w", errVolume, err)
+		s.fail(ctx, tenantID, reasonFor(err))
+		s.log.Warn("provision: could not create the data volume", "tenant", tenantID, "error", err)
+		return fmt.Errorf("provision: volume: %w", err)
+	}
 	if err := s.ensureJob(ctx, job, force); err != nil {
 		s.fail(ctx, tenantID, reasonFor(err))
-		s.log.Warn("provision: could not register the job", "tenant", tenantID, "error", err)
+		s.log.Warn("provision: "+what, "tenant", tenantID, "error", err)
 		return fmt.Errorf("provision: register: %w", err)
 	}
 	return nil
+}
+
+// lockTenant serialises the operations that register or change a tenant's
+// job (start, update, restart), across processes: a Start that read the
+// instance before an Update must not register its old version after the
+// Update's. It is a PostgreSQL advisory lock on a connection of its own,
+// released by unlock or, if anything goes wrong, by closing the session.
+func (s *Service) lockTenant(ctx context.Context, tenantID string) (unlock func(), err error) {
+	select {
+	case s.lockSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		<-s.lockSem
+		return nil, fmt.Errorf("provision: lock: %w", err)
+	}
+	const key = `hashtextextended($1, 5381)`
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(`+key+`)`, tenantID); err != nil {
+		// The lock may have been granted as the context ended; closing the
+		// session releases it for sure.
+		_ = conn.Hijack().Close(context.WithoutCancel(ctx))
+		<-s.lockSem
+		return nil, fmt.Errorf("provision: lock: %w", err)
+	}
+	return func() {
+		if _, err := conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(`+key+`)`, tenantID); err != nil {
+			_ = conn.Hijack().Close(context.WithoutCancel(ctx))
+		} else {
+			conn.Release()
+		}
+		<-s.lockSem
+	}, nil
 }
 
 // ensureJob registers job unless Nomad already has exactly that spec and it
@@ -305,10 +406,20 @@ func (s *Service) ensureJob(ctx context.Context, job nomad.Job, force bool) erro
 	return nomad.ErrConflict
 }
 
+// unreachable: no response arrived at all.
+func unreachable(err error) bool {
+	var ne *nomad.Error
+	return errors.As(err, &ne) && ne.Status == 0 && errors.Is(err, nomad.ErrUnavailable)
+}
+
 func reasonFor(err error) string {
 	switch {
 	case errors.Is(err, nomad.ErrDenied):
 		return ReasonDenied
+	case errors.Is(err, errVolume) && !unreachable(err):
+		// Nomad answered but would not make the volume (a 500 with no node
+		// that fits, a rejected request).
+		return ReasonVolume
 	case errors.Is(err, nomad.ErrUnavailable), errors.Is(err, nomad.ErrDisabled):
 		return ReasonUnreachable
 	}
@@ -331,8 +442,11 @@ func (s *Service) fail(ctx context.Context, tenantID, reason string) {
 // page.
 func (s *Service) Trigger(tenantID string) { s.trigger(tenantID, false) }
 
-// TriggerRestart is Trigger for a rotated token: a running instance is
-// restarted so it reads the new token from qm.
+// TriggerRestart is Trigger for a rotated token, or a retry of a failed
+// instance: a running instance is restarted so it reads the new token from
+// qm, and a failed one is registered again even if Nomad holds the same job.
+// Asked for while a start is in flight, the restart is queued and runs when
+// that start is done, so a token rotated during a start is never missed.
 func (s *Service) TriggerRestart(tenantID string) { s.trigger(tenantID, true) }
 
 func (s *Service) trigger(tenantID string, restart bool) {
@@ -340,7 +454,14 @@ func (s *Service) trigger(tenantID string, restart bool) {
 		return
 	}
 	s.mu.Lock()
-	if s.closed || s.inflight[tenantID] {
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if s.inflight[tenantID] {
+		if restart {
+			s.queued[tenantID] = true
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -349,28 +470,44 @@ func (s *Service) trigger(tenantID string, restart bool) {
 	s.mu.Unlock()
 	go func() {
 		defer s.wg.Done()
-		defer func() {
+		for {
+			if err := s.runTrigger(tenantID, restart); err != nil {
+				if !errors.Is(err, ErrNoGameAccount) && !errors.Is(err, ErrNotAllowed) {
+					s.log.Warn("provision: start failed", "tenant", tenantID, "error", err)
+				}
+			} else {
+				s.supervise(s.ctx, tenantID)
+			}
 			s.mu.Lock()
+			if s.queued[tenantID] && !s.closed && s.ctx.Err() == nil {
+				delete(s.queued, tenantID)
+				s.mu.Unlock()
+				restart = true
+				continue
+			}
+			delete(s.queued, tenantID)
 			delete(s.inflight, tenantID)
 			s.mu.Unlock()
-		}()
-		var err error
-		if inst, gerr := s.Get(s.ctx, tenantID); restart && gerr == nil && inst != nil && inst.State != StateStopped {
-			err = s.restart(s.ctx, tenantID, true)
-		} else {
-			err = s.Start(s.ctx, tenantID)
-		}
-		if err != nil {
-			if !errors.Is(err, ErrNoGameAccount) && !errors.Is(err, ErrNotAllowed) {
-				s.log.Warn("provision: start failed", "tenant", tenantID, "error", err)
-			}
 			return
 		}
-		s.supervise(s.ctx, tenantID)
 	}()
 }
 
-// supervise follows a pending instance until it is no longer pending.
+func (s *Service) runTrigger(tenantID string, restart bool) error {
+	if inst, err := s.Get(s.ctx, tenantID); restart && err == nil && inst != nil && inst.State != StateStopped {
+		return s.restart(s.ctx, tenantID, true)
+	}
+	return s.Start(s.ctx, tenantID)
+}
+
+func (s *Service) hasQueued(tenantID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.queued[tenantID]
+}
+
+// supervise follows a pending instance until it is no longer pending, or
+// until a restart is queued behind it.
 func (s *Service) supervise(ctx context.Context, tenantID string) {
 	for {
 		inst, err := s.Refresh(ctx, tenantID)
@@ -378,6 +515,9 @@ func (s *Service) supervise(ctx context.Context, tenantID string) {
 			return
 		}
 		if inst != nil && inst.State != StatePending {
+			return
+		}
+		if s.hasQueued(tenantID) {
 			return
 		}
 		select {
@@ -438,7 +578,7 @@ func (s *Service) Refresh(ctx context.Context, tenantID string) (*Instance, erro
 		return inst, nil
 	}
 	now := s.now()
-	st, err := s.nomad.Status(ctx, inst.JobID)
+	st, err := s.nomad.StatusLive(ctx, inst.JobID)
 	if err != nil {
 		if inst.State == StatePending && now.Sub(inst.RequestedAt) > s.timeout {
 			s.fail(ctx, tenantID, reasonFor(err))
@@ -457,7 +597,8 @@ func (s *Service) Refresh(ctx context.Context, tenantID string) (*Instance, erro
 	// Compare-and-set on what was read, so a stop or restart that happened
 	// meanwhile is not overwritten.
 	if _, err := s.pool.Exec(ctx, `
-		UPDATE tenant_instances SET state = $2, last_health = $3, last_health_at = $4, failure_reason = $5, updated_at = $4
+		UPDATE tenant_instances SET state = $2, last_health = $3, last_health_at = $4, failure_reason = $5, updated_at = $4,
+		    last_unhealthy_at = CASE WHEN $3 = 'unhealthy' THEN $4 ELSE last_unhealthy_at END
 		WHERE tenant_id = $1 AND state = $6 AND requested_at = $7`,
 		tenantID, state, health, now, reason, inst.State, inst.RequestedAt); err != nil {
 		return nil, fmt.Errorf("provision: record status: %w", err)
@@ -500,6 +641,7 @@ func (s *Service) Reconcile(ctx context.Context) {
 		}
 	}
 	rows.Close()
+	fixed := 0
 	for _, id := range ids {
 		if ctx.Err() != nil {
 			return
@@ -512,6 +654,12 @@ func (s *Service) Reconcile(ctx context.Context) {
 		}
 		if _, err := s.Refresh(ctx, id); err != nil && !errors.Is(err, ErrNotFound) {
 			s.log.Warn("provision: refresh failed", "tenant", id, "error", err)
+			continue
+		}
+		if fixed < s.drift {
+			if s.converge(ctx, id) {
+				fixed++
+			}
 		}
 	}
 }
@@ -596,6 +744,11 @@ func (s *Service) restart(ctx context.Context, tenantID string, mark bool) error
 	if err != nil {
 		return ErrNotFound
 	}
+	unlock, err := s.lockTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if mark {
 		if err := s.markPending(ctx, s.pool, tenantID); err != nil {
 			return err
@@ -613,7 +766,15 @@ func (s *Service) restart(ctx context.Context, tenantID string, mark bool) error
 		}
 		return nil
 	}
-	return s.start(ctx, tenantID, true)
+	// No allocation to restart (a failed or dead job). Registering the same
+	// spec again is only a new evaluation on real Nomad, which does not
+	// revive it, so the restart counter in the job meta is bumped: a new job
+	// version, a new deployment, a replaced allocation. The counter is stored
+	// and carried by every later render, and is outside the spec hash.
+	if _, err := s.pool.Exec(ctx, `UPDATE tenant_instances SET restart_seq = restart_seq + 1 WHERE tenant_id = $1`, tenantID); err != nil {
+		return fmt.Errorf("provision: restart: %w", err)
+	}
+	return s.startLocked(ctx, tenantID, true)
 }
 
 // Upstream is host:port of the tenant's running allocation, where the proxy

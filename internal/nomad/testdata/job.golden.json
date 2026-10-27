@@ -9,7 +9,7 @@
     "Type": "service",
     "Priority": 50,
     "Meta": {
-      "sanholo.spec": "2404f65db2b78267bbd2e47a531089c7cf29538ab8dbcb1634d09b187eeb57d6",
+      "sanholo.spec": "30e21329b5022602c08911e41160aaaddc77ef4b2cf5dcfeb06f3ec88e239a86",
       "sanholo.tenant": "acme-42",
       "sanholo.version": "0.7.1"
     },
@@ -34,7 +34,9 @@
             "Name": "data",
             "Type": "host",
             "Source": "sanholo-tenant-acme-42",
-            "ReadOnly": false
+            "ReadOnly": false,
+            "AccessMode": "single-node-writer",
+            "AttachmentMode": "file-system"
           }
         },
         "RestartPolicy": {
@@ -111,11 +113,11 @@
                 "-qm-role",
                 "sanholo-tenant",
                 "-qm-identity-file",
-                "${NOMAD_SECRETS_DIR}/nomad_qm.sanholo.jwt",
+                "${NOMAD_SECRETS_DIR}/nomad_qm_sanholo.jwt",
                 "-hosted-alert-url",
                 "https://app.example.org/internal/alerts",
                 "-hosted-alert-identity-file",
-                "${NOMAD_SECRETS_DIR}/nomad_sanholo.cloud.jwt",
+                "${NOMAD_SECRETS_DIR}/nomad_sanholo_cloud.jwt",
                 "-public-url",
                 "https://acme-42.sanholo.space",
                 "-catalog",
@@ -133,7 +135,7 @@
             },
             "Identities": [
               {
-                "Name": "qm.sanholo",
+                "Name": "qm_sanholo",
                 "Audience": [
                   "qm.sanholo"
                 ],
@@ -141,7 +143,7 @@
                 "TTL": 3600000000000
               },
               {
-                "Name": "sanholo.cloud",
+                "Name": "sanholo_cloud",
                 "Audience": [
                   "sanholo.cloud"
                 ],

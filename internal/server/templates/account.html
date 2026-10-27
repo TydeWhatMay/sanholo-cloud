@@ -15,6 +15,7 @@
 </form>{{end}}
 </div>{{end}}
 <p>To replace the stored token, enter a new token for the same game account.</p>
+<p><a href="/account/game/disconnect">Disconnect this game account</a></p>
 {{else}}<p>SanHolo needs the API token of your Replicant Space account to play for you. SanHolo checks the token once with the game, then shows the replicant it belongs to for you to confirm. The token is stored in the secrets store and is not shown again.</p>
 {{end}}<form method="post" action="/account/game/validate" autocomplete="off">
 <input type="hidden" name="csrf" value="{{.CSRF}}">

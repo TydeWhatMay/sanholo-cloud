@@ -239,3 +239,51 @@ func TestNewDefaultsToTheRealGame(t *testing.T) {
 		t.Fatal("plain http to a real host accepted")
 	}
 }
+
+// The earliest replicant is chosen by time, not by the text of the
+// timestamp: the text of RFC 3339 compares wrongly across fractional
+// precisions and offsets, and the choice names the game account.
+func TestMeChoosesTheEarliestReplicantByTime(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		reps []gamefake.Replicant
+		want string
+	}{
+		{"fraction after the whole second", []gamefake.Replicant{
+			{Code: "AAAA0001", Name: "A", CreatedAt: "2026-01-01T00:00:00.5Z"},
+			{Code: "BBBB0002", Name: "B", CreatedAt: "2026-01-01T00:00:00Z"},
+		}, "BBBB0002"},
+		{"different precisions", []gamefake.Replicant{
+			{Code: "AAAA0001", Name: "A", CreatedAt: "2026-01-01T00:00:00.123456789Z"},
+			{Code: "BBBB0002", Name: "B", CreatedAt: "2026-01-01T00:00:00.12Z"},
+		}, "BBBB0002"},
+		{"offset", []gamefake.Replicant{
+			{Code: "AAAA0001", Name: "A", CreatedAt: "2026-01-01T00:00:00Z"},
+			{Code: "BBBB0002", Name: "B", CreatedAt: "2026-01-01T01:00:00+02:00"},
+		}, "BBBB0002"},
+		{"same instant, the code decides", []gamefake.Replicant{
+			{Code: "BBBB0002", Name: "B", CreatedAt: "2026-01-01T00:00:00Z"},
+			{Code: "AAAA0001", Name: "A", CreatedAt: "2026-01-01T02:00:00+02:00"},
+		}, "AAAA0001"},
+		{"unreadable time sorts last", []gamefake.Replicant{
+			{Code: "AAAA0001", Name: "A", CreatedAt: "yesterday"},
+			{Code: "ZZZZ0009", Name: "Z", CreatedAt: "2030-01-01T00:00:00Z"},
+		}, "ZZZZ0009"},
+		{"all unreadable, the code decides", []gamefake.Replicant{
+			{Code: "BBBB0002", Name: "B", CreatedAt: ""},
+			{Code: "AAAA0001", Name: "A", CreatedAt: "x"},
+		}, "AAAA0001"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := gamefake.New(t)
+			f.AddAccount(tok, tc.reps...)
+			acct, err := newClient(t, f.URL()).Me(context.Background(), tok)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if acct.ReplicantCode != tc.want {
+				t.Errorf("chose %s, want %s", acct.ReplicantCode, tc.want)
+			}
+		})
+	}
+}

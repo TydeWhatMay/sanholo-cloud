@@ -112,6 +112,8 @@ func (a *App) mount(app *fiber.App) {
 	acct.Post("/game/validate", a.gameValidate)
 	acct.Post("/game/confirm", a.gameConfirm)
 	acct.Post("/game/cancel", a.gameCancel)
+	acct.Get("/game/disconnect", a.gameDisconnectConfirm)
+	acct.Post("/game/disconnect", a.gameDisconnect)
 	acct.Post("/instance/retry", a.instanceRetry)
 	acct.Post("/bridge/open", a.bridgeOpen)
 	app.Post("/signout", a.requireSession, a.signout)

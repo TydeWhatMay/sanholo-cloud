@@ -107,7 +107,24 @@ func (s *Service) StartTx(ctx context.Context, tx pgx.Tx, version string) (Summa
 	if err != nil {
 		return sum, err
 	}
-	return s.insertRows(ctx, tx, rel, cands, 0, true)
+	sum, err = s.insertRows(ctx, tx, rel, cands, 0, true)
+	if err != nil {
+		return sum, err
+	}
+	// The caller rolls the transaction back on an error, so nothing above
+	// stays: a canary that failed health lately holds the rollout back.
+	var recent bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM tenant_instances i
+		    WHERE i.last_unhealthy_at > $2
+		      AND (i.tenant_id IN (SELECT id FROM tenants WHERE is_canary) OR i.tenant_id = $1))`,
+		sum.Canary, now.Add(-CanaryGate)).Scan(&recent); err != nil {
+		return sum, fmt.Errorf("updater: start: canary health: %w", err)
+	}
+	if recent {
+		return sum, ErrCanaryUnhealthy
+	}
+	return sum, nil
 }
 
 // insertRows writes a row per candidate. Pending ones are batched: with

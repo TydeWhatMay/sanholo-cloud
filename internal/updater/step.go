@@ -163,6 +163,10 @@ func (s *Service) poll(ctx context.Context, rel Release, r Row) (halted bool, er
 	switch {
 	case cerr != nil && ctx.Err() != nil:
 		return false, ctx.Err()
+	case r.SoakStartedAt != nil && (cerr != nil || state == provision.UpdatePending || state == provision.UpdateHealthy):
+		// The health timeout is for getting healthy. Once the soak has begun
+		// its own checks decide, and an unreadable Nomad only waits.
+		return s.soakStep(ctx, rel, r)
 	case cerr != nil, state == provision.UpdatePending:
 		// Nomad unreadable counts as "not yet": only the timeout fails it.
 		if !expired {
@@ -170,8 +174,7 @@ func (s *Service) poll(ctx context.Context, rel Release, r Row) (halted bool, er
 		}
 		reason = provision.ReasonTimeout
 	case state == provision.UpdateHealthy:
-		_, err = s.setRow(ctx, rel, r, RowUpdating, RowDone, "", false)
-		return false, err
+		return s.soakStep(ctx, rel, r)
 	case state == provision.UpdateFailed:
 		reason = provision.ReasonDeployFailed
 	case state == provision.UpdateReverted:
@@ -185,6 +188,54 @@ func (s *Service) poll(ctx context.Context, rel Release, r Row) (halted bool, er
 		reason = provision.ReasonStopped
 	}
 	return true, s.halt(ctx, rel, r, reason)
+}
+
+// soakDuration is the soak of a row: the canary (batch 0) or a batch.
+func (s *Service) soakDuration(r Row) time.Duration {
+	if r.Batch == 0 {
+		return s.canary
+	}
+	return s.soak
+}
+
+// soakStep runs for an updating tenant whose deployment is healthy. The first
+// time it records the allocation and restart count and starts the soak
+// clock. Then, each pass, it reads the live checks, the restart count and the
+// allocation: any failure halts the rollout (and the tenant is put back); a
+// soak that lasts long enough with none makes the tenant done. Nomad being
+// unreadable only delays the end of the soak.
+func (s *Service) soakStep(ctx context.Context, rel Release, r Row) (halted bool, err error) {
+	d := s.soakDuration(r)
+	if d <= 0 {
+		_, err = s.setRow(ctx, rel, r, RowUpdating, RowDone, "", false)
+		return false, err
+	}
+	now := s.now()
+	if r.SoakStartedAt == nil {
+		base, berr := s.prov.SoakBaseline(ctx, r.TenantID)
+		if berr != nil {
+			return false, nil // try again next pass; the health timeout still applies
+		}
+		_, err = s.pool.Exec(ctx, `
+			UPDATE rollout_tenants SET soak_started_at = $3, soak_alloc = $4, soak_restarts = $5, updated_at = $3
+			WHERE release_version = $1 AND tenant_id = $2 AND state = 'updating'`,
+			rel.Version, r.TenantID, now, base.AllocID, base.Restarts)
+		return false, err
+	}
+	verdict, cerr := s.prov.CheckSoak(ctx, r.TenantID, provision.SoakBase{AllocID: r.SoakAlloc, Restarts: r.SoakRestarts})
+	switch {
+	case cerr != nil && ctx.Err() != nil:
+		return false, ctx.Err()
+	case cerr != nil:
+		return false, nil
+	case verdict != provision.SoakOK:
+		s.prov.MarkUnhealthy(ctx, r.TenantID)
+		return true, s.halt(ctx, rel, r, provision.SoakReason(verdict))
+	case now.Sub(*r.SoakStartedAt) >= d:
+		_, err = s.setRow(ctx, rel, r, RowUpdating, RowDone, "", false)
+		return false, err
+	}
+	return false, nil
 }
 
 // halt records a failure and stops the rollout. In one transaction: the
@@ -311,6 +362,13 @@ func (s *Service) finish(ctx context.Context, rel Release) error {
 			}
 		}
 		now := s.now()
+		if recent, err := canaryRecentlyUnhealthy(ctx, tx, rel.Version, now); err != nil {
+			return err
+		} else if recent {
+			// The canary was unhealthy lately: the release does not become
+			// the fleet target yet. It completes on a later pass.
+			return nil
+		}
 		if _, err := tx.Exec(ctx, `UPDATE releases SET is_target = false, updated_at = $1 WHERE is_target AND version <> $2`, now, rel.Version); err != nil {
 			return fmt.Errorf("updater: finish: %w", err)
 		}
@@ -326,4 +384,21 @@ func (s *Service) finish(ctx context.Context, rel Release) error {
 		}
 		return audited(ctx, tx, now, "rollout.complete", rel.Version, map[string]any{"done": done, "skipped": skipped})
 	})
+}
+
+// canaryRecentlyUnhealthy: the marked canary tenant, or the tenant that was
+// batch 0 of this rollout, was seen unhealthy within CanaryGate.
+func canaryRecentlyUnhealthy(ctx context.Context, tx pgx.Tx, version string, now time.Time) (bool, error) {
+	var recent bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		    SELECT 1 FROM tenant_instances i
+		    WHERE i.last_unhealthy_at > $2
+		      AND (i.tenant_id IN (SELECT id FROM tenants WHERE is_canary)
+		           OR i.tenant_id IN (SELECT tenant_id FROM rollout_tenants WHERE release_version = $1 AND batch = 0)))`,
+		version, now.Add(-CanaryGate)).Scan(&recent)
+	if err != nil {
+		return false, fmt.Errorf("updater: canary health: %w", err)
+	}
+	return recent, nil
 }

@@ -171,10 +171,14 @@ func (a *App) adminError(c *fiber.Ctx, err error) error {
 		return a.message(c, fiber.StatusConflict, "No change made", "The tenant is not in a state where this applies.")
 	case errors.Is(err, admin.ErrRestart):
 		return a.message(c, fiber.StatusBadGateway, "Restart not carried out", "The restart was recorded, but Nomad did not carry it out. The instance state shows what happened.")
+	case errors.Is(err, admin.ErrInstance):
+		return a.message(c, fiber.StatusBadGateway, "Done, but the bot was not changed", "The change was recorded, but Nomad did not stop the bot. The instance state shows what happened.")
 	case errors.Is(err, admin.ErrOwnTenant):
 		return a.message(c, fiber.StatusConflict, "No change made", "You cannot suspend your own tenant.")
 	case errors.Is(err, admin.ErrRolloutActive):
 		return a.message(c, fiber.StatusConflict, "No change made", "Another rollout is rolling or halted. Finish it, or abandon it, first.")
+	case errors.Is(err, admin.ErrCanaryUnhealthy):
+		return a.message(c, fiber.StatusConflict, "No change made", "The canary tenant failed its health check in the last hour. Start the rollout when it has been healthy for an hour.")
 	case errors.Is(err, admin.ErrReleaseExists):
 		return a.message(c, fiber.StatusConflict, "No change made", "That release is already added.")
 	case errors.Is(err, admin.ErrReleaseInvalid):

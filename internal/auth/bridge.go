@@ -45,7 +45,7 @@ func (s *Service) CreateHandoff(ctx context.Context, accountSessionID string) (c
 
 // RedeemHandoff spends a code for tenantID (the tenant of the host it
 // arrived on) and opens a Bridge session. A wrong tenant, a spent or expired
-// code, a revoked account session and a suspended tenant all give
+// code, a revoked account session and a suspended or deleting tenant all give
 // ErrHandoffInvalid, and a wrong-tenant attempt does not spend the code.
 func (s *Service) RedeemHandoff(ctx context.Context, code, tenantID string) (secret string, expires time.Time, err error) {
 	if code == "" {
@@ -65,7 +65,7 @@ func (s *Service) RedeemHandoff(ctx context.Context, code, tenantID string) (sec
 		WHERE h.code_hash = $1 AND h.used_at IS NULL AND h.expires_at > $3
 		  AND s.id = h.account_session_id AND s.expires_at > $3
 		  AND a.id = s.account_id AND a.tenant_id = $2
-		  AND t.id = a.tenant_id AND t.status <> 'suspended'
+		  AND t.id = a.tenant_id AND t.status IN ('pending', 'active')
 		RETURNING h.account_session_id::text, s.expires_at`, HashSecret(code), tenantID, now).Scan(&accountSessionID, &sessionExpires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", time.Time{}, ErrHandoffInvalid
@@ -93,9 +93,9 @@ func (s *Service) RedeemHandoff(ctx context.Context, code, tenantID string) (sec
 type BridgeSession struct {
 	TenantID  string
 	ExpiresAt time.Time
-	// Suspended is true when the tenant is suspended: the caller answers
-	// 404 for it.
-	Suspended bool
+	// Unavailable is true when the tenant is suspended or being deleted:
+	// the caller answers 404 for it.
+	Unavailable bool
 }
 
 // LookupBridgeSession finds the live Bridge session for a cookie secret. It
@@ -109,13 +109,13 @@ func (s *Service) LookupBridgeSession(ctx context.Context, secret string) (Bridg
 	now := s.now()
 	var b BridgeSession
 	err := s.pool.QueryRow(ctx, `
-		SELECT a.tenant_id, b.expires_at, t.status = 'suspended'
+		SELECT a.tenant_id, b.expires_at, t.status NOT IN ('pending', 'active')
 		FROM bridge_sessions b
 		JOIN account_sessions s ON s.id = b.account_session_id
 		JOIN accounts a ON a.id = s.account_id
 		JOIN tenants t ON t.id = a.tenant_id
 		WHERE b.secret_hash = $1 AND b.expires_at > $2 AND s.expires_at > $2`, HashSecret(secret), now,
-	).Scan(&b.TenantID, &b.ExpiresAt, &b.Suspended)
+	).Scan(&b.TenantID, &b.ExpiresAt, &b.Unavailable)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BridgeSession{}, ErrNoSession
 	}

@@ -40,6 +40,10 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The tenant's volume exists before its job is registered, as the
+	// provisioner arranges: a job without one is never placed. Seeded without
+	// requests so the tests below can count theirs.
+	f.AddVolume("sanholo-tenant-acme-42")
 	return &env{f, c, logs}
 }
 
@@ -158,12 +162,14 @@ func TestStatusPhases(t *testing.T) {
 		{nomadfake.Unhealthy, nomad.PhaseUnhealthy},
 		{nomadfake.Failed, nomad.PhaseFailed},
 	} {
+		e.fake.ReplaceAlloc(testJob) // Nomad decides health once per allocation
 		e.fake.SetPhase(testJob, tc.phase)
 		st, err := e.c.Status(ctx, testJob)
 		if err != nil || st.Phase != tc.want {
 			t.Errorf("%s: phase %q err %v, want %q", tc.phase, st.Phase, err, tc.want)
 		}
 	}
+	e.fake.ReplaceAlloc(testJob)
 	e.fake.SetPhase(testJob, nomadfake.Healthy)
 	st, _ = e.c.Status(ctx, testJob)
 	if st.Address != "10.0.0.7:23456" || st.AllocID == "" || st.Job.Image != "ghcr.io/tydewhatmay/sanholo:v0.7.1" {
@@ -419,5 +425,63 @@ func TestTokenNeverLoggedOnTransportFailure(t *testing.T) {
 		if strings.Contains(s, testToken) || strings.Contains(s, hostOnly) || strings.Contains(s, testJob) {
 			t.Errorf("the token, the address or the job id is in %q", s)
 		}
+	}
+}
+
+// Nomad decides the deployment's health verdict once. A check that fails
+// later, a restart and a replaced allocation show only in the live data.
+func TestStatusLiveSeesWhatTheDeploymentVerdictCannot(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := e.c.Register(ctx, e.job(t, "0.7.1"), nomad.RegisterOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.SetPhase(testJob, nomadfake.Healthy)
+	st, err := e.c.StatusLive(ctx, testJob)
+	if err != nil || st.Phase != nomad.PhaseHealthy || !st.ChecksRead || len(st.Checks) != 1 || st.Checks[0].Status != nomad.CheckSuccess {
+		t.Fatalf("healthy: %+v %v", st, err)
+	}
+	e.fake.SetCheck(testJob, "failure")
+	if st, _ := e.c.Status(ctx, testJob); st.Phase != nomad.PhaseHealthy {
+		t.Errorf("the deployment verdict changed to %q; it must not", st.Phase)
+	}
+	if st, _ := e.c.StatusLive(ctx, testJob); st.Phase != nomad.PhaseUnhealthy {
+		t.Errorf("a failing live check gives %q, want unhealthy", st.Phase)
+	}
+	e.fake.SetCheck(testJob, "pending")
+	if st, _ := e.c.StatusLive(ctx, testJob); st.Phase != nomad.PhaseHealthy {
+		t.Errorf("a pending check gives %q, want the deployment's healthy", st.Phase)
+	}
+}
+
+func TestStatusReportsRestartsAndTheAllocation(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := e.c.Register(ctx, e.job(t, "0.7.1"), nomad.RegisterOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.SetPhase(testJob, nomadfake.Healthy)
+	first, _ := e.c.Status(ctx, testJob)
+	e.fake.BumpRestarts(testJob)
+	e.fake.BumpRestarts(testJob)
+	again, _ := e.c.Status(ctx, testJob)
+	if first.Restarts != 0 || again.Restarts != 2 || again.AllocID != first.AllocID {
+		t.Errorf("restarts %d then %d, alloc %q then %q", first.Restarts, again.Restarts, first.AllocID, again.AllocID)
+	}
+	e.fake.ReplaceAlloc(testJob)
+	e.fake.SetPhase(testJob, nomadfake.Healthy)
+	third, _ := e.c.Status(ctx, testJob)
+	if third.AllocID == first.AllocID || third.Restarts != 0 {
+		t.Errorf("replacement: alloc %q restarts %d", third.AllocID, third.Restarts)
+	}
+}
+
+func TestChecksRefusesABadAllocationID(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.c.Checks(context.Background(), "../x"); err == nil {
+		t.Error("a path-like allocation id was sent")
+	}
+	if len(e.fake.Requests()) != 0 {
+		t.Error("a request was sent")
 	}
 }

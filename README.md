@@ -42,6 +42,8 @@ for them.
 | `TENANT_DOMAIN`, `TENANT_ALERT_URL`, `VAPID_PUBLIC_KEY` | Parent domain of the Bridge hosts (default `sanholo.space` once Nomad is configured; required with `PROXY_SIGNING_KEY` otherwise), alert endpoint (default `APP_BASE_URL/internal/alerts`) and the Web Push public key handed to the bots. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ`, `PROVISION_TIMEOUT` | Bot resources (384, 300) and how long a bot may take to become healthy (15m). |
 | `ROLLOUT_BATCH_SIZE`, `ROLLOUT_HEALTH_TIMEOUT` | How many tenants an update moves together after the canary (5, 1 to 50) and how long one may take to become healthy on the new version (default `PROVISION_TIMEOUT`; 1m to 6h). |
+| `ROLLOUT_CANARY_SOAK`, `ROLLOUT_BATCH_SOAK` | How long an updated tenant is watched after its deployment turned healthy before it counts as done: the canary (default `1h`) and every other batch (`10m`). `0` turns a soak off; the maximum is 24h. |
+| `TENANT_VOLUME_SIZE_MB`, `TENANT_VOLUME_NODE_POOL`, `TENANT_VOLUME_CONSTRAINT` | Each tenant's dynamic host volume (Nomad 1.10+, plugin `mkdir`): requested size (default 1024), optional node pool, and an optional node constraint written `${attribute}=value`. |
 | `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
 | `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
 | `WEBAUTHN_RP_NAME` | Name shown by the authenticator. Default `SanHolo`. |
@@ -199,8 +201,16 @@ sanholo-cloud release canary <tenant-id>|none
 With a digest the tenant job runs `image@digest`; without, `image:vX.Y.Z`.
 A rollout moves one canary tenant first (the tenant marked with `release canary`,
 else the oldest that has to move), waits for it to be healthy on the new version
-(Nomad's deployment verdict for the new job version), then moves batches of 5
-(`ROLLOUT_BATCH_SIZE`), each waiting for the one before. Tenants that are
+(Nomad's deployment verdict for the new job version) and then to soak, then
+moves batches of 5 (`ROLLOUT_BATCH_SIZE`), each waiting for the one before and
+soaking in turn. Nomad decides its verdict once, 30 seconds after the task
+starts, while the client answers 200 "starting" for up to ten minutes; the soak
+(1 hour for the canary, 10 minutes for a batch) is what notices a bot that never
+really came up. During it the live results of the `/healthz` check, the task
+restart count and the identity of the allocation are read each pass: a failing
+check, a restart or a replaced allocation counts as a failed update. The canary
+is also held to a rule over time: a rollout is not started, and does not
+complete, while the canary tenant was seen unhealthy in the last hour. Tenants that are
 suspended, stopped or not running are recorded as skipped and not touched; a
 tenant already on the release counts as done. The state is in PostgreSQL
 (`releases`, `rollout_tenants`), so a restarted control plane resumes where the
@@ -220,6 +230,36 @@ tenant and a fixed reason, never Nomad's text. A halted rollout waits for the
 operator: resume (the tenants that were reverted are tried again) or abandon
 (tenants already on the new version stay there). The account page shows the
 bot's version.
+
+The reconcile worker also keeps each running instance in line with what the
+control plane expects, without fighting the updater: a job whose spec differs
+from the one the current settings render (a rotated proxy key, a changed
+limit) is registered again, a few tenants per pass, and an instance that was
+skipped by a rollout because it was not running, and that is running on an old
+version later, is moved to the fleet target. Neither happens for a tenant with
+an unfinished row in a rollout, and the second waits for every rollout to end.
+The health shown on the account page and in `/admin` comes from the live check
+results, because Nomad's deployment verdict never changes after it is decided.
+
+A retry or an admin restart that finds no running allocation to restart
+registers the job again with a bumped `sanholo.restart` job meta (stored in
+`tenant_instances.restart_seq`, outside the spec hash). Registering an identical
+spec is only a new evaluation on Nomad and does not revive a failed job; a
+changed meta value makes a new job version, a new deployment and a replacement
+allocation. Every later render (updater, revert, reconcile) carries the stored
+value, and drift detection ignores it.
+
+### Disconnecting a game account
+
+`/account` offers "Disconnect this game account" (a confirmation page, then a
+POST with the CSRF token). It stops the bot (without purge, then with), deletes
+the game account and instance records and writes an audit row, in one
+transaction; the tenant and the account stay. Deleting the token in qm
+(`secrets.PurgeTenant`) and the tenant's host volume then follow. Until qm ships
+its purge endpoint the purge is refused: the deletion is kept in
+`pending_cleanups` (fixed reason phrase, attempt count) and retried every
+minute, and the customer is told so plainly. A new connect for the tenant
+cancels pending deletions, so a late purge cannot remove a new token.
 
 ### Bridge access and the proxy
 

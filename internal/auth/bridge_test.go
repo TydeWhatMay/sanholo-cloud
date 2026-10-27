@@ -67,7 +67,7 @@ func TestHandoffIsStoredHashedBoundAndSingleUse(t *testing.T) {
 		t.Errorf("expiry %v beyond the %v maximum", expires, BridgeSessionMax)
 	}
 	b, err := s.LookupBridgeSession(ctx, secret)
-	if err != nil || b.TenantID != tenantID || b.Suspended {
+	if err != nil || b.TenantID != tenantID || b.Unavailable {
 		t.Fatalf("lookup = %+v, %v", b, err)
 	}
 	// Single use.
@@ -107,6 +107,11 @@ func TestHandoffRefusals(t *testing.T) {
 		}},
 		{name: "tenant suspended", setup: func(t *testing.T, s *Service, pool *pgxpool.Pool, _, tenantID string) {
 			if _, err := pool.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, tenantID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "tenant being deleted", setup: func(t *testing.T, s *Service, pool *pgxpool.Pool, _, tenantID string) {
+			if _, err := pool.Exec(ctx, `UPDATE tenants SET status = 'deleting' WHERE id = $1`, tenantID); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -241,6 +246,11 @@ func TestBridgeSessionRefusals(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{name: "tenant being deleted", suspended: true, setup: func(t *testing.T, s *Service, pool *pgxpool.Pool, _, tenantID string) {
+			if _, err := pool.Exec(ctx, `UPDATE tenants SET status = 'deleting' WHERE id = $1`, tenantID); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,7 +264,7 @@ func TestBridgeSessionRefusals(t *testing.T) {
 			tc.setup(t, s, pool, sid, tenantID)
 			b, err := s.LookupBridgeSession(ctx, secret)
 			if tc.suspended {
-				if err != nil || !b.Suspended {
+				if err != nil || !b.Unavailable {
 					t.Fatalf("suspended tenant: %+v, %v", b, err)
 				}
 				return

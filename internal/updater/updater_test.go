@@ -65,7 +65,7 @@ func newEnv(t *testing.T, batch int) *env {
 		t.Fatal(err)
 	}
 	e.prov, err = provision.New(e.pool, e.nc, provision.Options{
-		Settings: nomadfake.Settings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond,
+		Settings: nomadfake.Settings(), Volume: nomadfake.VolumeSettings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)

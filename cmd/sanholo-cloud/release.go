@@ -146,6 +146,8 @@ func releaseErr(err error, what string) error {
 		return fmt.Errorf("release %s: %w", what, err)
 	case errors.Is(err, admin.ErrRolloutActive):
 		return errors.New("another rollout is rolling or halted: resume or abandon it first")
+	case errors.Is(err, admin.ErrCanaryUnhealthy):
+		return errors.New("the canary tenant failed its health check in the last hour: start the rollout when it has been healthy for an hour")
 	case errors.Is(err, admin.ErrState):
 		return errors.New("not applicable in the current state (the release is already rolling, or there is no halted rollout, or a revert is still under way)")
 	}

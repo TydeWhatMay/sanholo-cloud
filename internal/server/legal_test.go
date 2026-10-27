@@ -105,3 +105,20 @@ func TestPrivacyRetentionMatchesTheCode(t *testing.T) {
 		t.Errorf("session TTL %v or invite TTL %v changed: update the privacy notice", auth.SessionTTL, auth.InviteTTL)
 	}
 }
+
+// A replaced token stays in qm as an older version (qm keeps up to 16), and
+// a disconnect can leave a deletion pending; the notice says both.
+func TestPrivacyStatesOlderTokenVersionsAndPendingDeletion(t *testing.T) {
+	e := newEnv(t, auth.Options{})
+	body := e.client(t).get("/privacy", nil).body
+	for _, want := range []string{
+		"keeps the earlier token as an older version",
+		"up to 16 versions",
+		"until you disconnect your game account or delete your account",
+		"records it and retries until it succeeds",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("privacy notice lacks %q", want)
+		}
+	}
+}

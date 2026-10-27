@@ -82,6 +82,9 @@ var (
 	ErrRolloutActive = errors.New("another rollout is under way")
 	// ErrState: the action does not apply to the release's current state.
 	ErrState = errors.New("not applicable in the current state")
+	// ErrCanaryUnhealthy: the canary tenant failed its health check in the
+	// last hour, so a rollout is not started (and not completed).
+	ErrCanaryUnhealthy = errors.New("the canary tenant was unhealthy in the last hour")
 )
 
 // Options configure the service.
@@ -93,8 +96,20 @@ type Options struct {
 	// new version (and, after a failure, on the old one). Default 15
 	// minutes.
 	HealthTimeout time.Duration
-	Logger        *slog.Logger
+	// CanarySoak and BatchSoak are how long a tenant is watched after its
+	// deployment turned healthy before it counts as done: the canary (batch
+	// 0) and every other batch. Nomad's own verdict comes 30 seconds in, and
+	// the client answers 200 "starting" for up to ten minutes, so the soak is
+	// what notices a bot that never really came up. Zero skips the soak (the
+	// configuration default is 1h and 10m).
+	CanarySoak time.Duration
+	BatchSoak  time.Duration
+	Logger     *slog.Logger
 }
+
+// CanaryGate is how long after a health failure of the canary tenant a
+// rollout is refused.
+const CanaryGate = time.Hour
 
 // Service plans and drives rollouts.
 type Service struct {
@@ -102,6 +117,8 @@ type Service struct {
 	prov    *provision.Service
 	batch   int
 	timeout time.Duration
+	canary  time.Duration
+	soak    time.Duration
 	log     *slog.Logger
 	now     func() time.Time
 
@@ -112,7 +129,7 @@ type Service struct {
 // only touch the database (add, plan, resume, abandon); Step then does
 // nothing.
 func New(pool *pgxpool.Pool, prov *provision.Service, opt Options) *Service {
-	s := &Service{pool: pool, prov: prov, batch: opt.BatchSize, timeout: opt.HealthTimeout, log: opt.Logger, now: time.Now}
+	s := &Service{pool: pool, prov: prov, batch: opt.BatchSize, timeout: opt.HealthTimeout, canary: opt.CanarySoak, soak: opt.BatchSoak, log: opt.Logger, now: time.Now}
 	if s.batch <= 0 {
 		s.batch = 5
 	}
@@ -155,6 +172,11 @@ type Row struct {
 	PreviousDigest  string
 	StartedAt       *time.Time
 	UpdatedAt       time.Time
+	// SoakStartedAt is when the deployment turned healthy and the soak
+	// began; SoakAlloc and SoakRestarts are what the soak compares against.
+	SoakStartedAt *time.Time
+	SoakAlloc     string
+	SoakRestarts  int
 }
 
 const releaseCols = `version, coalesce(digest, ''), notes, url, state, is_target, batch_size, halted_tenant, halt_reason, created_at, started_at, finished_at`
@@ -165,11 +187,11 @@ func scanRelease(row pgx.Row) (Release, error) {
 	return r, err
 }
 
-const rowCols = `release_version, tenant_id, batch, state, reason, previous_version, previous_digest, started_at, updated_at`
+const rowCols = `release_version, tenant_id, batch, state, reason, previous_version, previous_digest, started_at, updated_at, soak_started_at, soak_alloc, soak_restarts`
 
 func scanRow(row pgx.Row) (Row, error) {
 	var r Row
-	err := row.Scan(&r.Version, &r.TenantID, &r.Batch, &r.State, &r.Reason, &r.PreviousVersion, &r.PreviousDigest, &r.StartedAt, &r.UpdatedAt)
+	err := row.Scan(&r.Version, &r.TenantID, &r.Batch, &r.State, &r.Reason, &r.PreviousVersion, &r.PreviousDigest, &r.StartedAt, &r.UpdatedAt, &r.SoakStartedAt, &r.SoakAlloc, &r.SoakRestarts)
 	return r, err
 }
 

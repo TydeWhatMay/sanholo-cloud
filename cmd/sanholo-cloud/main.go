@@ -95,7 +95,7 @@ func main() {
 		log.Fatal(err)
 	}
 	prov, err := provision.New(pool, nc, provision.Options{
-		Settings: cfg.Nomad.Job, Version: cfg.Nomad.Version, Timeout: cfg.Nomad.Timeout, Logger: slog.Default(),
+		Settings: cfg.Nomad.Job, Volume: cfg.Nomad.Volume, Version: cfg.Nomad.Version, Timeout: cfg.Nomad.Timeout, Logger: slog.Default(),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -107,8 +107,12 @@ func main() {
 		log.Print("provisioning: NOMAD_ADDR not set; tenant bots are not started")
 	}
 
+	conn.SetProvisioner(prov)
+	go conn.RunCleanups(ctx, time.Minute)
+
 	upd := updater.New(pool, prov, updater.Options{
-		BatchSize: cfg.Nomad.RolloutBatch, HealthTimeout: cfg.Nomad.RolloutTimeout, Logger: slog.Default(),
+		BatchSize: cfg.Nomad.RolloutBatch, HealthTimeout: cfg.Nomad.RolloutTimeout,
+		CanarySoak: cfg.Nomad.CanarySoak, BatchSoak: cfg.Nomad.BatchSoak, Logger: slog.Default(),
 	})
 	if prov.Enabled() {
 		go upd.Run(ctx, 10*time.Second)
