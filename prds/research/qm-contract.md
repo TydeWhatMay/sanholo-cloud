@@ -42,3 +42,16 @@ Nomad JWT login per Appendix A.4 with role `sanholo-tenant`, aud
 `qm.sanholo`; reads `secret/data/sanholo/tenants/<id>/game`; 404 means
 offboarded. Fields `api_token`, `replicant_code` (SanHolo's choice; qm
 imposes none).
+
+## Reply shapes (confirmed from qm handlers, 2026-10-27)
+
+- Read (workload): `{"data":{"api_token":..,"replicant_code":..},"metadata":{...}}`,
+  one `data` level. A soft-deleted current version replies with metadata only;
+  a missing path is 404. Client fixed in san-holo `b80927e`.
+- Login (approle and nomad share one handler):
+  `{"auth":{"client_token","accessor","policies","lease_duration":<seconds>}}`.
+  No `tenant` field yet (that is qm's unbuilt Part A).
+- renew-self (optional `{"increment":"1h"}`):
+  `{"auth":{"accessor","lease_duration"}}`, no new token; 403 means log in again.
+- `auth/nomad/login` exists only once the operator mounts the jwt method
+  at `auth/nomad` (Appendix A.1).
