@@ -170,8 +170,10 @@ func TestLoadHostedSettings(t *testing.T) {
 	}
 	// prodEnv is a complete production environment with one key replaced
 	// (an empty value removes it).
+	vPub, vPriv := vapidPair(t)
 	prodEnv := func(key, val string) map[string]string {
 		m := map[string]string{
+			"VAPID_PUBLIC_KEY": vPub, "VAPID_PRIVATE_KEY": vPriv, "VAPID_SUBJECT": "mailto:ops@tydewhatmay.eu",
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw",
 			"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8",
 			"QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "role-1", "QM_SECRET_ID_FILE": "/run/secrets/qm-secret-id",
@@ -229,6 +231,7 @@ func TestLoadHostedSettings(t *testing.T) {
 			"TRUSTED_PROXIES": "10.0.0.0/8", "QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "r", "QM_SECRET_ID": "s",
 			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "t", "SANHOLO_IMAGE_VERSION": "0.7.1",
 			"PROXY_SIGNING_KEY": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+			"VAPID_PUBLIC_KEY":  vPub, "VAPID_PRIVATE_KEY": vPriv, "VAPID_SUBJECT": "mailto:ops@tydewhatmay.eu",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)

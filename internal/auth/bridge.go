@@ -91,8 +91,12 @@ func (s *Service) RedeemHandoff(ctx context.Context, code, tenantID string) (sec
 
 // BridgeSession is a live Bridge session.
 type BridgeSession struct {
-	TenantID  string
-	ExpiresAt time.Time
+	TenantID string
+	// AccountID and AccountSessionID are the account and the session the
+	// Bridge session came from.
+	AccountID        string
+	AccountSessionID string
+	ExpiresAt        time.Time
 	// Unavailable is true when the tenant is suspended or being deleted:
 	// the caller answers 404 for it.
 	Unavailable bool
@@ -109,13 +113,13 @@ func (s *Service) LookupBridgeSession(ctx context.Context, secret string) (Bridg
 	now := s.now()
 	var b BridgeSession
 	err := s.pool.QueryRow(ctx, `
-		SELECT a.tenant_id, b.expires_at, t.status NOT IN ('pending', 'active')
+		SELECT a.tenant_id, a.id::text, s.id::text, b.expires_at, t.status NOT IN ('pending', 'active')
 		FROM bridge_sessions b
 		JOIN account_sessions s ON s.id = b.account_session_id
 		JOIN accounts a ON a.id = s.account_id
 		JOIN tenants t ON t.id = a.tenant_id
 		WHERE b.secret_hash = $1 AND b.expires_at > $2 AND s.expires_at > $2`, HashSecret(secret), now,
-	).Scan(&b.TenantID, &b.ExpiresAt, &b.Unavailable)
+	).Scan(&b.TenantID, &b.AccountID, &b.AccountSessionID, &b.ExpiresAt, &b.Unavailable)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BridgeSession{}, ErrNoSession
 	}

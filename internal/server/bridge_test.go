@@ -38,11 +38,13 @@ type bridgeEnv struct {
 	*env
 	// key signs the proxy's identities (testKey unless a test changes it
 	// before calling rebuild).
-	key  ed25519.PrivateKey
-	up   *httptest.Server
-	res  *fakeResolver
-	mu   sync.Mutex
-	reqs []recorded
+	key ed25519.PrivateKey
+	// extra, when set, adjusts the App that rebuild mounts.
+	extra func(*App)
+	up    *httptest.Server
+	res   *fakeResolver
+	mu    sync.Mutex
+	reqs  []recorded
 }
 
 type fakeResolver struct {
@@ -122,10 +124,14 @@ func (b *bridgeEnv) rebuild(t *testing.T, res proxy.Resolver, prov *provision.Se
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.env.app = New(b.pool, WithApp(&App{
+	app := &App{
 		Auth: b.svc, Admin: b.admin, Provision: prov, Proxy: px, AppBaseURL: appOrigin, TenantDomain: testDomain,
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/32")},
-	}))
+	}
+	if b.extra != nil {
+		b.extra(app)
+	}
+	b.env.app = New(b.pool, WithApp(app))
 	b.env.host = appHost
 }
 

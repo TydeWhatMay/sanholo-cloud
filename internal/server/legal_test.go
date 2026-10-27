@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/auth"
+	"github.com/lhaig/sanholo-cloud/internal/push"
 )
 
 func TestLegalPages(t *testing.T) {
@@ -85,6 +86,10 @@ func TestPrivacyRetentionMatchesTheCode(t *testing.T) {
 		"is queued until it is sent, and its text is then erased",
 		"no hashes of them",
 		"identifier, not by the email address",
+		"Push subscriptions: until you turn notifications off, until your browser's push service reports the subscription as gone, or until you delete your account.",
+		"An account can hold up to 10 subscriptions",
+		"at most 30 notifications an hour",
+		"without being able to read it",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("privacy notice lacks %q", want)
@@ -100,6 +105,9 @@ func TestPrivacyRetentionMatchesTheCode(t *testing.T) {
 		if strings.Contains(body, stale) {
 			t.Errorf("privacy notice still says %q", stale)
 		}
+	}
+	if push.MaxPerTenant != 10 || push.HourlyCap != 30 {
+		t.Errorf("push subscription cap %d or hourly cap %d changed: update the privacy notice", push.MaxPerTenant, push.HourlyCap)
 	}
 	if auth.SessionTTL != 30*24*time.Hour || auth.InviteTTL != 14*24*time.Hour {
 		t.Errorf("session TTL %v or invite TTL %v changed: update the privacy notice", auth.SessionTTL, auth.InviteTTL)

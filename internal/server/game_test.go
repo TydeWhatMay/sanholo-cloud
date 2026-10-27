@@ -602,7 +602,7 @@ func TestPrivacyNoticeDescribesTheGameAccountRecord(t *testing.T) {
 		"which game account you connected",
 		"the name and code of that replicant",
 		"held in the server's memory for up to 10 minutes",
-		"Account, game account record, game token, instance volume and push subscriptions: until",
+		"Account, game account record, game token and instance volume: until",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("privacy notice lacks %q", want)

@@ -54,6 +54,9 @@ type Config struct {
 	// (PROXY_SIGNING_KEY or _FILE). Nil leaves the Bridge proxy off. A
 	// secret: never log or print a Config.
 	ProxyKey ed25519.PrivateKey
+	// Push holds the Web Push keys and the Nomad JWKS location used to
+	// verify alerts from the bots (US-016).
+	Push Push
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
@@ -254,6 +257,20 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, err)
 	}
 	c.Nomad = nm
+	push, err := pushSettings(getenv, nm.Client.Addr)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Push = push
+	if c.Production && !push.VAPIDEnabled() {
+		// Without the keys every alert is dropped and nobody notices.
+		errs = append(errs, errors.New("production needs VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY (or _FILE) and VAPID_SUBJECT"))
+	}
+	if c.Nomad.Enabled() {
+		// One source of truth: the key the control plane signs with is the
+		// key the tenant jobs hand to the Bridge.
+		c.Nomad.Job.VAPIDPublicKey = push.VAPIDPublic
+	}
 	c.TenantDomain = getenv("TENANT_DOMAIN")
 	if c.Nomad.Enabled() {
 		c.TenantDomain = c.Nomad.Job.TenantDomain
@@ -342,7 +359,7 @@ func qmSettings(getenv func(string) string, production bool) (QM, error) {
 //	sanholo), NOMAD_REGION, NOMAD_DATACENTERS (default dc1), NOMAD_HOST_NETWORK,
 //	SANHOLO_IMAGE_VERSION, SANHOLO_IMAGE_REPO, TENANT_PROXY_PUBLIC_KEYS or
 //	TENANT_PROXY_PUBLIC_KEYS_FILE, TENANT_DOMAIN, TENANT_ALERT_URL,
-//	VAPID_PUBLIC_KEY, TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT,
+//	TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT,
 //	ROLLOUT_BATCH_SIZE (default 5), ROLLOUT_HEALTH_TIMEOUT (default PROVISION_TIMEOUT),
 //	ROLLOUT_CANARY_SOAK (default 1h), ROLLOUT_BATCH_SOAK (default 10m; 0 turns
 //	a soak off), TENANT_VOLUME_SIZE_MB (default 1024), TENANT_VOLUME_NODE_POOL,
@@ -376,7 +393,7 @@ func nomadSettings(getenv func(string) string, appBase, qmAddr string, productio
 		Namespace: n.Client.Namespace, Region: n.Client.Region, Datacenters: []string{"dc1"},
 		ImageRepo: nomad.DefaultImageRepo, HostNetwork: getenv("NOMAD_HOST_NETWORK"),
 		QMAddr: qmAddr, TenantDomain: "sanholo.space", MemoryMB: 384, CPUMHz: 300,
-		VAPIDPublicKey: getenv("VAPID_PUBLIC_KEY"), AlertURL: appBase + "/internal/alerts",
+		AlertURL: appBase + "/internal/alerts",
 	}
 	if v := getenv("NOMAD_DATACENTERS"); v != "" {
 		j.Datacenters = nil

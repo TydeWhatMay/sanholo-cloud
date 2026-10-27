@@ -18,6 +18,8 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/connect"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/proxy"
+	"github.com/lhaig/sanholo-cloud/internal/push"
+	"github.com/lhaig/sanholo-cloud/internal/workload"
 )
 
 //go:embed templates/*.html
@@ -49,6 +51,13 @@ type App struct {
 	Provision *provision.Service
 	// TrustedProxies are the edge addresses whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
+	// Push delivers alerts, PushStore holds the subscriptions and Workload
+	// verifies the bots' Nomad identity tokens (US-016). Without PushStore
+	// the subscribe endpoints answer 503; without all three /internal/alerts
+	// does.
+	Push      *push.Service
+	PushStore *push.Store
+	Workload  *workload.Verifier
 	// Proxy, with AppBaseURL and TenantDomain, turns on host routing:
 	// <tenant-id>.<TenantDomain> is the tenant's Bridge behind Proxy, the
 	// host of AppBaseURL is the control plane, and any other Host is 404.
@@ -87,6 +96,8 @@ func (a *App) mount(app *fiber.App) {
 	// The filesystem middleware's Cache-Control replaces no-store: the assets
 	// are not personal and an hour's caching is harmless.
 	app.Use("/static", filesystem.New(filesystem.Config{Root: http.FS(static), MaxAge: 3600}))
+	// A bot's alert carries no cookie, so it sits before the CSRF check.
+	app.Post("/internal/alerts", a.alertIntake)
 	app.Use(csrf())
 
 	app.Get("/", a.home)

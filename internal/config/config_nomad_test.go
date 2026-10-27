@@ -131,6 +131,12 @@ func TestLoadNomadRequiredInProduction(t *testing.T) {
 		t.Fatalf("production without a signing key: %v", err)
 	}
 	prod["PROXY_SIGNING_KEY"] = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+	// Without VAPID keys every alert would be dropped silently.
+	if _, err := Load(env(prod)); err == nil || !strings.Contains(err.Error(), "production needs VAPID") {
+		t.Fatalf("production without VAPID keys: %v", err)
+	}
+	pub, priv := vapidPair(t)
+	prod["VAPID_PUBLIC_KEY"], prod["VAPID_PRIVATE_KEY"], prod["VAPID_SUBJECT"] = pub, priv, "mailto:ops@tydewhatmay.eu"
 	if _, err := Load(env(prod)); err != nil {
 		t.Fatalf("production with Nomad: %v", err)
 	}

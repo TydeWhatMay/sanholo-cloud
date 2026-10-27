@@ -39,7 +39,10 @@ for them.
 | `SANHOLO_IMAGE_VERSION`, `SANHOLO_IMAGE_REPO` | Version new instances start at (`0.7.1` or `v0.7.1`) and the image repository (default `ghcr.io/tydewhatmay/sanholo`). |
 | `PROXY_SIGNING_KEY`, `PROXY_SIGNING_KEY_FILE` | The Ed25519 private key the proxy signs each request's identity with: a PKCS#8 `PRIVATE KEY` PEM, or base64 of the 32-byte seed. Exactly one of the two. Turns the Bridge proxy on; required when `APP_ENV=production`. Never logged. The public key in every tenant job is derived from it. Generate: `openssl genpkey -algorithm ed25519`. |
 | `TENANT_PROXY_PUBLIC_KEYS`, `TENANT_PROXY_PUBLIC_KEYS_FILE` | With `PROXY_SIGNING_KEY`: optional, the next public key during a rotation (PEM, or base64 one per line), added after the signing key's own. Without it (development, proxy off): the proxy's public key(s), exactly one of the two. |
-| `TENANT_DOMAIN`, `TENANT_ALERT_URL`, `VAPID_PUBLIC_KEY` | Parent domain of the Bridge hosts (default `sanholo.space` once Nomad is configured; required with `PROXY_SIGNING_KEY` otherwise), alert endpoint (default `APP_BASE_URL/internal/alerts`) and the Web Push public key handed to the bots. |
+| `TENANT_DOMAIN`, `TENANT_ALERT_URL` | Parent domain of the Bridge hosts (default `sanholo.space` once Nomad is configured; required with `PROXY_SIGNING_KEY` otherwise) and the alert endpoint the bots post to (default `APP_BASE_URL/internal/alerts`). |
+| `NOMAD_JWKS_URL` | Where Nomad's signing keys are fetched to verify the bots' alert tokens. Default `${NOMAD_ADDR}/.well-known/jwks.json`; `https`, or `http` on loopback. Unset without `NOMAD_ADDR`: `/internal/alerts` answers 503. |
+| `NOMAD_JWT_ISSUER` | Optional. When set, the tokens' `iss` must equal it. Nomad adds `iss` only when the server sets `oidc_issuer`, so the default is not to check it; the keys, the audience, the namespace and the job id are checked either way. |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` or `VAPID_PRIVATE_KEY_FILE`, `VAPID_SUBJECT` | TydeWhatMay's Web Push (VAPID) keys, all or none. Keys are base64url P-256 (public 65 bytes, private 32 bytes); the public key must be the private key's, or the service refuses to start. `VAPID_SUBJECT` is `mailto:address` or an https URL. The public key is the single source for the tenant jobs' `-hosted-vapid-public-key` too. Generate a pair with `sanholo-cloud vapid generate` (prints both as environment lines). Required when `APP_ENV=production`; in development, without them nothing is pushed and the Bridge shows no notification button. The private key is a secret: deliver it as a file from qm. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ`, `PROVISION_TIMEOUT` | Bot resources (384, 300) and how long a bot may take to become healthy (15m). |
 | `ROLLOUT_BATCH_SIZE`, `ROLLOUT_HEALTH_TIMEOUT` | How many tenants an update moves together after the canary (5, 1 to 50) and how long one may take to become healthy on the new version (default `PROVISION_TIMEOUT`; 1m to 6h). |
 | `ROLLOUT_CANARY_SOAK`, `ROLLOUT_BATCH_SOAK` | How long an updated tenant is watched after its deployment turned healthy before it counts as done: the canary (default `1h`) and every other batch (`10m`). `0` turns a soak off; the maximum is 24h. |
@@ -332,6 +335,66 @@ Key rotation: set `TENANT_PROXY_PUBLIC_KEYS` to the new public key and roll the
 tenant jobs (the key file is part of the job, so the updater does it); then make
 the new key `PROXY_SIGNING_KEY` and drop the old public key. Tenants accept
 both during the overlap.
+
+### Notifications (Web Push)
+
+`internal/push`, `internal/workload`, `internal/server/push.go`.
+
+- **Subscribing.** The Bridge's "Enable notifications" posts the browser's
+  subscription to `POST /push/subscribe` on the tenant host. The control plane
+  answers it itself, before the proxy: the instance has no such route and never
+  sees it. It needs the tenant's Bridge session (no session is `401`, another
+  tenant's session or a suspended tenant is `404`) and the Bridge's own CSRF
+  scheme, verified here because the control plane answers in the Bridge's place:
+  the 64 hex character `__Host-sanholo_csrf` cookie repeated in `X-CSRF-Token`.
+  `Origin` (if sent) must be the tenant's origin, `Sec-Fetch-Site` (if sent)
+  `same-origin`, and the body JSON of at most 4 KiB. The endpoint must be `https`
+  on port 443 with a public DNS name (no IP literal, `localhost`, single-label or
+  `.internal`/`.local` name, no credentials), at most 2048 bytes; `p256dh` must
+  be a valid P-256 point (65 bytes) and `auth` 16 bytes, both unpadded base64url.
+  At send time the HTTP client also refuses to connect to a non-public address,
+  uses no proxy and follows no redirect, so a name that resolves to an internal
+  address is refused. A tenant holds at most 10 subscriptions (`409` beyond; the
+  same browser subscribing again updates its keys), the endpoint is unique across
+  tenants (`409`), and `POST /push/unsubscribe` with `{"endpoint": ...}` removes
+  one of the tenant's own. The table is `push_subscriptions` (migration 0014:
+  `tenant_id`, `account_id`, `account_session_id` informational, set null when the
+  session ends). A subscription outlives its session and goes when the person
+  unsubscribes, the push service answers `404`/`410`, or the tenant is deleted.
+- **Alerts.** `POST /internal/alerts` on the app host: the bot sends
+  `Authorization: Bearer <Nomad workload JWT>` and the JSON the client builds
+  (`kind, severity, text, key, at, link`). The token is verified against Nomad's
+  JWKS (RS256 or EdDSA; keys cached ten minutes and refetched when a key id is
+  unknown, at most every 30 seconds): audience exactly `sanholo.cloud`, `exp`,
+  `nbf` and `iat` present and valid with 30 seconds of skew, `nomad_namespace`
+  equal to `NOMAD_NAMESPACE`, `nomad_job_id` of the form `sanholo-tenant-<id>`
+  with a valid tenant id. The tenant is that id, nothing else; `X-SanHolo-Tenant`
+  is ignored. Every refusal is `401` with no reason; unreachable keys are `503`
+  so the bot can tell. The kind must be one the bot sends, the text at most 280
+  characters, the body at most 8 KiB; the tenant must exist and not be deleting
+  (`403`); 300 posts per tenant per hour are accepted. The answer is `202` once
+  the alert is queued: delivery runs on a bounded queue (256) with four workers
+  and never delays the post.
+- **Delivery.** Web Push with TydeWhatMay's VAPID keys through
+  `github.com/SherClockHolmes/webpush-go` (RFC 8291 `aes128gcm`, RFC 8292), to
+  every subscription of the tenant. The payload is exactly the service worker's
+  `{title, body, link, key, kind}`: the title is `SanHolo: <kind>`, the body the
+  alert text cut to 240 characters without control characters, the link rebuilt
+  on the tenant's own origin from the bot's link keeping only `alert`, `job` and
+  `sys`. `404`/`410` deletes the subscription; `429` and `5xx` retry after
+  5 s, 10 s (longer if `Retry-After` says so, at most 5 minutes), three attempts
+  in all; other refusals are logged and the row is kept.
+- **Cap.** 30 alerts per tenant per fixed one-hour window, opened by the first
+  counted alert. The 31st gets one push, "More alerts are waiting in your
+  Bridge.", and nothing more until the hour is over, then the count starts again.
+  Counting happens when there is at least one subscription to deliver to. The
+  window lives in memory: a restart resets it.
+- **Preferences.** Snooze-style routing, quiet hours and which kinds are sent
+  are applied by the bot (`internal/alert` in the client, before the hosted sink
+  is called), so the control plane does not apply them again.
+- **Operators.** `push.Service.NotifyOperator(kind, text)` pushes to every
+  subscription of a tenant that has an operator account, with a cap bucket of its
+  own. Task 3.4 calls it.
 
 ### The gate
 

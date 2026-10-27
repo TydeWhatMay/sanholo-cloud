@@ -48,7 +48,7 @@ The tenant logs in to qm at `auth/nomad` (the jwt method the operator mounts, qm
   qm's JWT auth role `sanholo-tenant` must accept audience `qm.sanholo` from
   Nomad's JWKS and map `nomad_job_id` (`sanholo-tenant-<id>`) to the tenant
   prefix. The control plane verifies the second token against the same JWKS
-  (task 3.1).
+  (section 7).
 
 ## 2. Host volumes
 
@@ -148,7 +148,8 @@ is in the client release notes) and make the job run `image@digest`.
 | `TENANT_PROXY_PUBLIC_KEYS` or `TENANT_PROXY_PUBLIC_KEYS_FILE` | Optional with `PROXY_SIGNING_KEY`: the next public key during a rotation, so tenants accept two. Public. |
 | `TENANT_DOMAIN` | Default `sanholo.space`; each bot gets `-public-url https://<id>.<domain>`, and `<id>.<domain>` is where the control plane serves that bot's Bridge. |
 | `TENANT_ALERT_URL` | Where bots post alerts. Default `APP_BASE_URL/internal/alerts`. |
-| `VAPID_PUBLIC_KEY` | Optional Web Push public key passed to the bots. |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` or `_FILE`, `VAPID_SUBJECT` | Web Push keys, all or none (section 7). The public key is passed to the bots. |
+| `NOMAD_JWKS_URL`, `NOMAD_JWT_ISSUER` | Section 7. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ` | Default 384 and 300. |
 | `PROVISION_TIMEOUT` | How long a bot may take to become healthy. Default 15m. |
 | `ROLLOUT_BATCH_SIZE`, `ROLLOUT_HEALTH_TIMEOUT` | Tenants per update batch (default 5) and how long one may take to be healthy on the new version (default `PROVISION_TIMEOUT`). The job's own update stanza (`auto_revert`, healthy deadline 10m) still applies per tenant. |
@@ -180,3 +181,30 @@ left to the updater). To rotate without a moment of rejected requests:
 4. Wait for the reconcile pass again (the derived public key list changed
    order), then remove the old public key from `TENANT_PROXY_PUBLIC_KEYS`,
    restart, and wait for the pass once more. Only the new key remains.
+
+## 7. Web Push and the alert intake (task 3.1)
+
+- **The control plane must reach Nomad's JWKS**
+  (`${NOMAD_ADDR}/.well-known/jwks.json`, or `NOMAD_JWKS_URL`). The endpoint
+  needs no ACL token (checked on a Nomad 2.0.6 dev agent). If it is unreachable
+  for longer than an hour the control plane stops accepting alerts (`503`); it
+  keeps the keys it has for up to an hour.
+- Nomad signs the workload tokens with RS256 (the dev agent's JWKS lists RSA keys
+  with `alg: RS256`); EdDSA is accepted too. The tokens carry no `iss` unless the
+  Nomad server sets `oidc_issuer`; if it does, set `NOMAD_JWT_ISSUER` to the same
+  value. The claims used: `aud` (exactly `sanholo.cloud`), `exp`, `nbf`, `iat`,
+  `nomad_namespace` and `nomad_job_id`.
+- **Tenants must reach the control plane's `/internal/alerts`** (`TENANT_ALERT_URL`,
+  default `APP_BASE_URL/internal/alerts`), which is the app host, so the firewall
+  rule in section 3 already covers it. The endpoint is authenticated by the Nomad
+  token alone; as a second layer the edge may restrict `/internal/` to the
+  platform network. The tenant hosts do not serve it.
+- **The control plane must reach the browsers' push services** on 443
+  (`fcm.googleapis.com`, `updates.push.services.mozilla.com`,
+  `web.push.apple.com`, `*.notify.windows.com`, and others by vendor). It uses no
+  HTTP proxy from the environment and refuses private and loopback addresses.
+- The VAPID private key is a secret like the proxy signing key: deliver it as a
+  file from qm (`VAPID_PRIVATE_KEY_FILE`). Changing the key pair orphans every
+  subscription (a browser's subscription is bound to the public key it was made
+  with); do not rotate it casually. The tenant jobs get the public key from the
+  same setting, so a change re-registers every job through the reconcile worker.

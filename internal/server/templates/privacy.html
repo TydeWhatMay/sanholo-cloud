@@ -30,7 +30,8 @@
 <p>Your SanHolo instance stores the game state it reads from Replicant Space, the bot's activity log, your goals and settings, on a disk volume reserved for your account.</p>
 
 <h3>Notifications</h3>
-<p>If you turn on browser notifications, SanHolo stores the push subscription your browser provides. Notifications are delivered through the push service of your browser's vendor. Their content is encrypted end to end between SanHolo and your browser.</p>
+<p>If you turn on browser notifications, SanHolo stores the push subscription your browser provides for each browser you enable: the push service address of your browser's vendor, two keys that belong to that subscription, the date it was made, and which of your sessions made it. An account can hold up to 10 subscriptions. SanHolo sends at most 30 notifications an hour per account.</p>
+<p>A notification carries the alert title, the alert text from your SanHolo instance (up to 240 characters) and a link to your Bridge. Notifications are delivered through the push service of your browser's vendor. The content is encrypted on SanHolo's server with your browser's keys, so the push service passes it on without being able to read it. The push service does see that a notification was sent to your browser, and when.</p>
 
 <h3>Email sent to you</h3>
 <p>Invites, sign-in links and notices that a passkey was added are queued before sending. The text of a queued email is erased when the email is sent or given up on. The queue entry is deleted 7 days after that.</p>
@@ -58,6 +59,7 @@
 <tbody>
 <tr><td>Hetzner Online GmbH</td><td>Servers, disk volumes and backups</td><td>Germany</td></tr>
 <tr><td>AhaSend</td><td>Delivery of invite and sign-in email: your email address and the message</td><td>EU region</td></tr>
+<tr><td>The push service of your browser's vendor (for example Google, Mozilla, Apple or Microsoft)</td><td>Delivery of notifications to your browser: the encrypted notification and the address of your subscription</td><td>Set by your browser's vendor</td></tr>
 </tbody>
 </table>
 <p>Replicant Space is a game run by a third party. SanHolo sends requests to Replicant Space with your API token, as the game client would. Your game account and what Replicant Space stores about it are covered by Replicant Space's own terms.</p>
@@ -66,7 +68,8 @@
 <ul>
 <li>Waiting list entry: until you create an account, or until you ask for it to be removed.</li>
 <li>Invites: 14 days after they expire. An invite is valid for 14 days.</li>
-<li>Account, game account record, game token, instance volume and push subscriptions: until you delete your account or disconnect your game account.</li>
+<li>Account, game account record, game token and instance volume: until you delete your account or disconnect your game account.</li>
+<li>Push subscriptions: until you turn notifications off, until your browser's push service reports the subscription as gone, or until you delete your account. A subscription stays when you sign out.</li>
 <li>Sessions: 30 days after last use.</li>
 <li>Sign-in links and requests: 1 day after use or expiry.</li>
 <li>Queued email: the text is erased when the email is sent or given up on. The queue entry is deleted 7 days after that.</li>

@@ -84,11 +84,25 @@ func (b *bridgeRouting) tenantOf(host string) (string, bool) {
 
 // origin is the Bridge origin of a tenant.
 func (b *bridgeRouting) origin(tenantID string) string {
-	host := tenantID + "." + b.domain
-	if b.port != "" {
-		host += ":" + b.port
+	return tenantOrigin(b.scheme, b.domain, b.port, tenantID)
+}
+
+func tenantOrigin(scheme, domain, port, tenantID string) string {
+	host := tenantID + "." + domain
+	if port != "" {
+		host += ":" + port
 	}
-	return b.scheme + "://" + host
+	return scheme + "://" + host
+}
+
+// TenantOriginFunc returns the Bridge origin of a tenant, derived from the app
+// origin (scheme and port) and the tenant domain exactly as the routing does.
+func TenantOriginFunc(appBaseURL, domain string) (func(tenantID string) string, error) {
+	b, err := newBridgeRouting(nil, appBaseURL, domain)
+	if err != nil {
+		return nil, err
+	}
+	return b.origin, nil
 }
 
 // route is the first middleware after recover. The app host falls through to
@@ -126,6 +140,10 @@ func (a *App) bridge(c *fiber.Ctx, tenantID string) error {
 		if secret != "" {
 			clearBridgeCookie(c)
 		}
+		if isPushPath(c.Path()) {
+			// A script's fetch must not follow a redirect to the sign-in page.
+			return jsonStatus(c, fiber.StatusUnauthorized, "sign in again")
+		}
 		return a.toSignin(c)
 	case err != nil:
 		return c.Status(fiber.StatusInternalServerError).SendString("Something went wrong")
@@ -134,6 +152,9 @@ func (a *App) bridge(c *fiber.Ctx, tenantID string) error {
 	// unknown host, so neither tells the visitor anything.
 	if bs.TenantID != tenantID || bs.Unavailable {
 		return notFound(c)
+	}
+	if isPushPath(c.Path()) {
+		return a.bridgePush(c, tenantID, bs)
 	}
 	return a.bridges.proxy.Handle(c, tenantID)
 }

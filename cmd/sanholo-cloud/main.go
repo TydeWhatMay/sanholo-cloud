@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
@@ -24,9 +25,11 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/proxy"
+	"github.com/lhaig/sanholo-cloud/internal/push"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 	"github.com/lhaig/sanholo-cloud/internal/updater"
+	"github.com/lhaig/sanholo-cloud/internal/workload"
 )
 
 // version is set at build time (-ldflags "-X main.version=1.2.3"); it goes
@@ -36,6 +39,12 @@ var version = "dev"
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "operator" {
 		if err := runOperator(context.Background(), os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "vapid" && os.Args[2] == "generate" {
+		if err := vapidGenerate(os.Stdout); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -165,6 +174,7 @@ func main() {
 	} else {
 		log.Print("proxy: PROXY_SIGNING_KEY not set; Bridges are not served and every Host reaches the control plane")
 	}
+	wirePush(ctx, cfg, pool, web)
 	app := server.New(pool, server.WithApp(web))
 	go func() {
 		<-ctx.Done()
@@ -172,5 +182,41 @@ func main() {
 	}()
 	if err := app.Listen(cfg.ListenAddr); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// wirePush turns on Web Push (VAPID keys) and the alert intake (Nomad JWKS).
+// Either can be absent in development; the endpoints then answer 503.
+func wirePush(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, web *server.App) {
+	web.PushStore = push.NewStore(pool)
+	if cfg.Push.VAPIDEnabled() {
+		domain := cfg.TenantDomain
+		if domain == "" {
+			domain = "sanholo.space"
+		}
+		origin, err := server.TenantOriginFunc(cfg.AppBaseURL, domain)
+		if err != nil {
+			log.Fatalf("push: %v", err)
+		}
+		web.Push = push.New(push.Config{
+			Store: web.PushStore, TenantOrigin: origin, Logger: slog.Default(),
+			Sender: push.NewWebPush(push.VAPID{Private: cfg.Push.VAPIDPrivate, Public: cfg.Push.VAPIDPublic, Subject: cfg.Push.VAPIDSubject}),
+		})
+		web.Push.Start(ctx)
+	} else {
+		log.Print("push: VAPID keys not set; notifications are not sent")
+	}
+	if cfg.Push.JWKSURL != "" {
+		ns := cfg.Nomad.Client.Namespace
+		if ns == "" {
+			ns = nomad.DefaultNamespace
+		}
+		v, err := workload.New(workload.Config{JWKSURL: cfg.Push.JWKSURL, Issuer: cfg.Push.JWTIssuer, Namespace: ns})
+		if err != nil {
+			log.Fatalf("alerts: %v", err)
+		}
+		web.Workload = v
+	} else {
+		log.Print("alerts: no Nomad JWKS URL; /internal/alerts is off")
 	}
 }
