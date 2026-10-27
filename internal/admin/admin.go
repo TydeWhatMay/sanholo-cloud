@@ -122,13 +122,19 @@ type Tenant struct {
 	Email     string
 	CreatedAt time.Time
 	Status    string
+	// GameName and GameCode are the connected replicant, empty when no game
+	// account is connected. Never a token: the database has none.
+	GameName string
+	GameCode string
 }
 
 // Tenants lists every tenant, newest first.
 func (s *Service) Tenants(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT t.id, coalesce(a.email, ''), t.created_at, t.status
+		SELECT t.id, coalesce(a.email, ''), t.created_at, t.status,
+		       coalesce(g.replicant_name, ''), coalesce(g.replicant_code, '')
 		FROM tenants t LEFT JOIN accounts a ON a.tenant_id = t.id
+		LEFT JOIN game_accounts g ON g.tenant_id = t.id
 		ORDER BY t.created_at DESC, t.id`)
 	if err != nil {
 		return nil, fmt.Errorf("admin: tenants: %w", err)
@@ -137,7 +143,7 @@ func (s *Service) Tenants(ctx context.Context) ([]Tenant, error) {
 	var out []Tenant
 	for rows.Next() {
 		var t Tenant
-		if err := rows.Scan(&t.ID, &t.Email, &t.CreatedAt, &t.Status); err != nil {
+		if err := rows.Scan(&t.ID, &t.Email, &t.CreatedAt, &t.Status, &t.GameName, &t.GameCode); err != nil {
 			return nil, fmt.Errorf("admin: tenants: %w", err)
 		}
 		out = append(out, t)

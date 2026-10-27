@@ -15,6 +15,7 @@ import (
 
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
+	"github.com/lhaig/sanholo-cloud/internal/connect"
 )
 
 //go:embed templates/*.html
@@ -37,6 +38,9 @@ type App struct {
 	Auth *auth.Service
 	// Admin serves /admin; nil leaves the admin pages off (404).
 	Admin *admin.Service
+	// Connect serves the game-account section of /account; nil (or a service
+	// without qm) shows that connecting is not available.
+	Connect *connect.Service
 	// TrustedProxies are the edge addresses whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
 }
@@ -82,6 +86,9 @@ func (a *App) mount(app *fiber.App) {
 	acct.Post("/passkeys/register/begin", a.passkeyRegisterBegin)
 	acct.Post("/passkeys/register/finish", a.passkeyRegisterFinish)
 	acct.Post("/passkeys/:id/delete", a.passkeyDelete)
+	acct.Post("/game/validate", a.gameValidate)
+	acct.Post("/game/confirm", a.gameConfirm)
+	acct.Post("/game/cancel", a.gameCancel)
 	app.Post("/signout", a.requireSession, a.signout)
 	a.mountAdmin(app)
 }
@@ -323,9 +330,20 @@ func (a *App) account(c *fiber.Ctx) error {
 			keys = append(keys, k)
 		}
 	}
-	return a.render(c, fiber.StatusOK, "account", "Account", fiber.Map{
+	data := fiber.Map{
 		"Email": ses.Email, "Sessions": rows, "Passkeys": a.Auth.PasskeysEnabled(), "Keys": keys, "IsOperator": ses.IsOperator,
-	})
+		"GameAvailable": a.Connect.Available(),
+	}
+	if a.Connect != nil {
+		g, err := a.Connect.Get(c.UserContext(), ses.TenantID)
+		if err != nil {
+			return a.serverError(c)
+		}
+		if g != nil {
+			data["Game"] = fiber.Map{"Name": g.ReplicantName, "Code": g.ReplicantCode, "Connected": g.ConnectedAt.UTC().Format("2006-01-02")}
+		}
+	}
+	return a.render(c, fiber.StatusOK, "account", "Account", data)
 }
 
 func (a *App) revoke(c *fiber.Ctx) error {

@@ -1,0 +1,13 @@
+<h1>Confirm your game account</h1>
+<p>The game accepted the token. It belongs to the replicant:</p>
+<p><strong>{{.Name}}</strong> ({{.Code}})</p>
+{{if .Reconnect}}<p>This game account is already connected. Confirming replaces the stored token.</p>{{end}}
+<p>The token is held for 10 minutes. It is stored only when you confirm.</p>
+<form method="post" action="/account/game/confirm">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><button type="submit">Confirm</button></p>
+</form>
+<form method="post" action="/account/game/cancel">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><button class="plain" type="submit">Cancel</button></p>
+</form>

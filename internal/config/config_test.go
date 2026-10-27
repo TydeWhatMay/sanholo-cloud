@@ -32,6 +32,29 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "game api url defaults to the real game",
+			env:  map[string]string{"DATABASE_URL": "postgres://u:p@h/d"},
+			check: func(t *testing.T, c Config) {
+				if c.GameURL != "https://api.replicant.space" {
+					t.Errorf("GameURL = %q", c.GameURL)
+				}
+			},
+		},
+		{
+			name: "game api url set",
+			env:  map[string]string{"DATABASE_URL": "postgres://u:p@h/d", "GAME_API_URL": "http://127.0.0.1:9000/"},
+			check: func(t *testing.T, c Config) {
+				if c.GameURL != "http://127.0.0.1:9000" {
+					t.Errorf("GameURL = %q", c.GameURL)
+				}
+			},
+		},
+		{
+			name:    "game api url refuses plain http to a real host",
+			env:     map[string]string{"DATABASE_URL": "postgres://u:p@h/d", "GAME_API_URL": "http://api.replicant.space"},
+			wantErr: "GAME_API_URL",
+		},
+		{
 			name: "database url wins over PG vars",
 			env: map[string]string{
 				"DATABASE_URL": "postgres://a/b", "PGHOST": "other", "PGUSER": "u", "PGDATABASE": "d",
@@ -80,10 +103,10 @@ func TestLoad(t *testing.T) {
 			name: "beta values",
 			env: map[string]string{
 				"DATABASE_URL": "postgres://h/d", "LISTEN_ADDR": "0.0.0.0:9000",
-				"BETA_INVITE_ONLY": "true", "BETA_MAX_TENANTS": "5", "BETA_MAX_GAME_ACCOUNTS_PER_TENANT": "2",
+				"BETA_INVITE_ONLY": "true", "BETA_MAX_TENANTS": "5", "BETA_MAX_GAME_ACCOUNTS_PER_TENANT": "1",
 			},
 			check: func(t *testing.T, c Config) {
-				if c.ListenAddr != "0.0.0.0:9000" || !c.Beta.InviteOnly || c.Beta.MaxTenants != 5 || c.Beta.MaxGameAccountsPerTenant != 2 {
+				if c.ListenAddr != "0.0.0.0:9000" || !c.Beta.InviteOnly || c.Beta.MaxTenants != 5 || c.Beta.MaxGameAccountsPerTenant != 1 {
 					t.Errorf("config = %+v", c)
 				}
 			},
@@ -91,6 +114,7 @@ func TestLoad(t *testing.T) {
 		{name: "bad bool", env: map[string]string{"DATABASE_URL": "postgres://h/d", "BETA_INVITE_ONLY": "maybe"}, wantErr: "BETA_INVITE_ONLY"},
 		{name: "bad int", env: map[string]string{"DATABASE_URL": "postgres://h/d", "BETA_MAX_TENANTS": "many"}, wantErr: "BETA_MAX_TENANTS"},
 		{name: "zero tenants", env: map[string]string{"DATABASE_URL": "postgres://h/d", "BETA_MAX_TENANTS": "0"}, wantErr: "BETA_MAX_TENANTS"},
+		{name: "more than one game account", env: map[string]string{"DATABASE_URL": "postgres://h/d", "BETA_MAX_GAME_ACCOUNTS_PER_TENANT": "2"}, wantErr: "only 1 is supported"},
 		{name: "negative accounts", env: map[string]string{"DATABASE_URL": "postgres://h/d", "BETA_MAX_GAME_ACCOUNTS_PER_TENANT": "-1"}, wantErr: "BETA_MAX_GAME_ACCOUNTS_PER_TENANT"},
 		{name: "non-postgres url", env: map[string]string{"DATABASE_URL": "mysql://h/d"}, wantErr: "DATABASE_URL"},
 		{name: "unparseable url", env: map[string]string{"DATABASE_URL": "postgres://h:notaport/d"}, wantErr: "DATABASE_URL"},

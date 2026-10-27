@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lhaig/sanholo-cloud/internal/game"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 )
 
@@ -33,6 +34,9 @@ type Config struct {
 	// QM is the control plane's route to tenant secrets. Empty Addr means
 	// secrets are disabled (development only; production requires it).
 	QM QM
+	// GameURL is the Replicant Space API origin (GAME_API_URL), without a
+	// trailing slash.
+	GameURL string
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
@@ -125,6 +129,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if err := positiveInt(getenv, "BETA_MAX_GAME_ACCOUNTS_PER_TENANT", &c.Beta.MaxGameAccountsPerTenant); err != nil {
 		errs = append(errs, err)
+	} else if c.Beta.MaxGameAccountsPerTenant != 1 {
+		// qm holds one game credential per tenant (secrets layout).
+		errs = append(errs, errors.New("BETA_MAX_GAME_ACCOUNTS_PER_TENANT: only 1 is supported"))
 	}
 	if v := getenv("APP_BASE_URL"); v != "" {
 		base, err := baseURL(v)
@@ -175,6 +182,15 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, err)
 	}
 	c.QM = qm
+	c.GameURL = game.DefaultURL
+	if v := getenv("GAME_API_URL"); v != "" {
+		u, err := game.ParseURL(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("GAME_API_URL: %w", err))
+		} else {
+			c.GameURL = u
+		}
+	}
 	wa, err := webAuthn(getenv, c.AppBaseURL)
 	if err != nil {
 		errs = append(errs, err)

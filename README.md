@@ -21,7 +21,8 @@ for them.
 | `LISTEN_ADDR` | Listen address. Default `127.0.0.1:8090`. |
 | `BETA_INVITE_ONLY` | Default `true`. `false` is refused at start: open sign-up needs email verification, which is not built. |
 | `BETA_MAX_TENANTS` | Tenant cap. Default `20`. |
-| `BETA_MAX_GAME_ACCOUNTS_PER_TENANT` | Default `1`. |
+| `BETA_MAX_GAME_ACCOUNTS_PER_TENANT` | Default `1`. Only `1` is supported: qm holds one game credential per tenant, and any other value is refused at start. |
+| `GAME_API_URL` | Replicant Space API origin. Default `https://api.replicant.space`. `https`, or `http` on a loopback host (tests). |
 | `APP_BASE_URL` | Public origin, used to build sign-in links. `https` unless the host is loopback. Default `http://127.0.0.1:8090`. |
 | `TRUSTED_PROXIES` | Comma-separated CIDRs or addresses of the edge. `X-Forwarded-For` is believed only from these peers; otherwise the peer address is the client address for rate limits. Default empty. |
 | `APP_ENV` | `production` or `development` (default). In production `SMTP_HOST`, `SMTP_USERNAME`, `TRUSTED_PROXIES` and an explicit https `APP_BASE_URL` are required, and the service refuses to start without them. |
@@ -111,6 +112,33 @@ a tenant's game credentials (`Put`), list names (`List`) and destroy
 `PurgeTenant` and `Rotate`. Every wire detail is in `secrets/wire.go`
 (provisional until qm's integration contract lands); `secrets/qmfake` is the
 in-memory qm the tests use.
+
+### Game account
+
+The account page has a "Game account" section. The customer pastes an API
+token; the control plane checks it with one `GET /v1/accounts/me` to the game
+(`internal/game`: timeout, bounded body, no redirects, User-Agent
+`SanHolo-Cloud/<version>`), then shows the replicant's name and code. A
+second button, Confirm, stores it. The game's account record has no
+identifier of its own (its email can be changed), so the game account id is
+derived from the account's earliest replicant: `replicant:<code>`.
+
+Between the two steps the token is held in process memory only, for 10
+minutes, under the hash of a random secret in a `__Host-` cookie, bound to
+the signed-in account and used once. It is never written to PostgreSQL, not
+even encrypted. A restart, or a second instance answering the confirm,
+loses it and the customer enters the token again.
+
+Confirm writes the `game_accounts` row (tenant, game account id, replicant
+name and code, connected date; `tenant_id` and `game_account_id` are both
+unique) inside a transaction, then writes `{api_token, replicant_code}` to
+qm with `secrets.Put`, then commits. A game account already connected to
+another tenant loses the race at the unique constraint before anything
+reaches qm; a failed qm write rolls the row back. A different game account
+for a tenant that has one is refused (beta limit: one). Connecting the same
+game account again with a new token uses `secrets.Rotate`. Without `QM_ADDR`
+the section says connecting is not available. "Create a new account" is not
+built: it waits on the developer's answer about registrations per IP.
 
 ### The gate
 

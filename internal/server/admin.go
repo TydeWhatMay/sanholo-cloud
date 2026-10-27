@@ -62,10 +62,14 @@ func (a *App) adminTenants(c *fiber.Ctx) error {
 	if err != nil {
 		return a.serverError(c)
 	}
-	type row struct{ ID, Email, Created, Status string }
+	type row struct{ ID, Email, Created, Status, Game string }
 	rows := make([]row, 0, len(list))
 	for _, t := range list {
-		rows = append(rows, row{t.ID, t.Email, t.CreatedAt.UTC().Format(timeFmt), t.Status})
+		game := ""
+		if t.GameCode != "" {
+			game = t.GameName + " (" + t.GameCode + ")"
+		}
+		rows = append(rows, row{t.ID, t.Email, t.CreatedAt.UTC().Format(timeFmt), t.Status, game})
 	}
 	return a.adminPage(c, "admin_tenants", "Tenants", fiber.Map{"Tenants": rows})
 }

@@ -24,6 +24,7 @@
 
 <h3>Your game account</h3>
 <p>To play for you, SanHolo needs your Replicant Space API token. The token is stored encrypted in a secrets store on SanHolo's servers. Only your own SanHolo instance can read it. The sign-up service can write and delete it but cannot read it back. The token is never written to the database, to logs or to the export.</p>
+<p>The database records which game account you connected: an identifier derived from the game account's earliest replicant, the name and code of that replicant, and the date you connected it. SanHolo uses the identifier to refuse a game account that is already connected to another SanHolo account. To check the token, SanHolo asks the game once for your account's replicants; it keeps nothing else the game returns, and not your game email address. Between checking a token and your confirmation, the token is held in the server's memory for up to 10 minutes and then discarded.</p>
 <p>Your SanHolo instance stores the game state it reads from Replicant Space, the bot's activity log, your goals and settings, on a disk volume reserved for your account.</p>
 
 <h3>Notifications</h3>
@@ -63,7 +64,7 @@
 <ul>
 <li>Waiting list entry: until you create an account, or until you ask for it to be removed.</li>
 <li>Invites: 14 days after they expire. An invite is valid for 14 days.</li>
-<li>Account, game token, instance volume and push subscriptions: until you delete your account or disconnect your game account.</li>
+<li>Account, game account record, game token, instance volume and push subscriptions: until you delete your account or disconnect your game account.</li>
 <li>Sessions: 30 days after last use.</li>
 <li>Sign-in links and requests: 1 day after use or expiry.</li>
 <li>Queued email: the text is erased when the email is sent or given up on. The queue entry is deleted 7 days after that.</li>

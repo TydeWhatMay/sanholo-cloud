@@ -141,8 +141,8 @@ func TestTenantTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != "accounts" {
-		t.Fatalf("TenantTables = %v, want [accounts]", got)
+	if strings.Join(got, ",") != "accounts,game_accounts" {
+		t.Fatalf("TenantTables = %v, want [accounts game_accounts]", got)
 	}
 
 	// A future table with tenant_id appears with no hand-kept list; a view
@@ -160,8 +160,8 @@ func TestTenantTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got, ",") != "accounts,sessions" {
-		t.Fatalf("TenantTables = %v, want [accounts sessions]", got)
+	if strings.Join(got, ",") != "accounts,game_accounts,sessions" {
+		t.Fatalf("TenantTables = %v, want [accounts game_accounts sessions]", got)
 	}
 }
 

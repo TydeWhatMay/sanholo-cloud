@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,11 +16,17 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/config"
+	"github.com/lhaig/sanholo-cloud/internal/connect"
 	"github.com/lhaig/sanholo-cloud/internal/db"
+	"github.com/lhaig/sanholo-cloud/internal/game"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 )
+
+// version is set at build time (-ldflags "-X main.version=1.2.3"); it goes
+// into the User-Agent sent to the game.
+var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "operator" {
@@ -46,8 +53,7 @@ func main() {
 	}
 
 	// The secrets client is built here so a bad qm address or token file
-	// stops the service at start. Nothing uses it until game accounts are
-	// connected (task 2.2).
+	// stops the service at start.
 	sec, err := secrets.New(secrets.Config{Addr: cfg.QM.Addr, Token: cfg.QM.Token, TokenFile: cfg.QM.TokenFile})
 	if err != nil {
 		log.Fatal(err)
@@ -59,7 +65,14 @@ func main() {
 	} else {
 		log.Print("secrets: QM_ADDR not set; storing game tokens is disabled")
 	}
-	_ = sec
+	gc, err := game.New(game.Config{BaseURL: cfg.GameURL, Version: version})
+	if err != nil {
+		log.Fatal(err)
+	}
+	conn, err := connect.New(pool, sec, gc, slog.Default(), cfg.Beta.MaxGameAccountsPerTenant)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	var wa *webauthn.WebAuthn
 	if cfg.WebAuthn.Enabled() {
@@ -88,7 +101,7 @@ func main() {
 	w := &mail.Worker{Pool: pool, Mailer: mailer}
 	go w.Run(ctx, 2*time.Second)
 
-	app := server.New(pool, server.WithApp(&server.App{Auth: svc, Admin: admin.New(pool, svc), TrustedProxies: cfg.TrustedProxies}))
+	app := server.New(pool, server.WithApp(&server.App{Auth: svc, Admin: admin.New(pool, svc), Connect: conn, TrustedProxies: cfg.TrustedProxies}))
 	go func() {
 		<-ctx.Done()
 		_ = app.Shutdown()

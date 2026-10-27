@@ -1,5 +1,17 @@
 <h1>Account</h1>
 <p>Signed in as {{.Email}}.{{if .IsOperator}} <a href="/admin">Admin</a>{{end}}</p>
+<h2>Game account</h2>
+{{if not .GameAvailable}}<p>Connecting a game account is not available here.</p>
+{{else}}{{if .Game}}<p>Connected to the replicant <strong>{{.Game.Name}}</strong> ({{.Game.Code}}) on {{.Game.Connected}}.</p>
+<p>To replace the stored token, enter a new token for the same game account.</p>
+{{else}}<p>SanHolo needs the API token of your Replicant Space account to play for you. SanHolo checks the token once with the game, then shows the replicant it belongs to for you to confirm. The token is stored in the secrets store and is not shown again.</p>
+{{end}}<form method="post" action="/account/game/validate" autocomplete="off">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="game-token">API token</label>
+<p><input id="game-token" type="password" name="token" required maxlength="512" autocomplete="off" spellcheck="false"></p>
+<button type="submit">Check the token</button>
+</form>
+{{end}}
 {{if .Passkeys}}<h2>Passkeys</h2>
 {{if .Keys}}<table>
 <tr><th>Added</th><th>Last used</th><th></th></tr>
