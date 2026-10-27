@@ -77,6 +77,21 @@ type Fake struct {
 	// OnRegister is the phase a newly registered version starts in; the
 	// zero value means Pending.
 	OnRegister Phase
+
+	failImage  string
+	failRevert bool
+}
+
+// FailImage scripts a bad release: a registration whose image contains
+// substr (a version tag or a digest) starts in the Failed phase. With
+// revert the fake then does what Nomad's auto_revert does: it registers the
+// job's previous document again as a new job version, healthy. Without it
+// the failed version stays the job's current one, for a caller that has to
+// roll back itself. An empty substr clears the script.
+func (f *Fake) FailImage(substr string, revert bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failImage, f.failRevert = substr, revert
 }
 
 // New starts a fake that accepts token in namespace.
@@ -170,7 +185,10 @@ func (f *Fake) Restarts(jobID string) int {
 
 // Image is the image of the registered job, empty when absent.
 func (f *Fake) Image(jobID string) string {
-	raw := f.Job(jobID)
+	return imageOf(f.Job(jobID))
+}
+
+func imageOf(raw map[string]any) string {
 	if raw == nil {
 		return ""
 	}
@@ -279,7 +297,19 @@ func (f *Fake) register(w http.ResponseWriter, body []byte) {
 		cur.allocSeq++
 		cur.allocID = fmt.Sprintf("a110c%03d-0000-0000-0000-%012d", cur.allocSeq, len(id))
 	}
+	prevRaw, prevSpec := cur.raw, cur.spec
 	cur.spec, cur.raw, cur.stop, cur.modifyIndex = spec, p.Job, false, f.index
+	if f.failImage != "" && strings.Contains(imageOf(p.Job), f.failImage) {
+		cur.phase = Failed
+		if f.failRevert && prevRaw != nil && prevSpec != spec {
+			// The failed deployment's allocation is replaced by one of the
+			// previous document, registered as a new job version.
+			cur.version++
+			cur.allocSeq++
+			cur.allocID = fmt.Sprintf("a110c%03d-0000-0000-0000-%012d", cur.allocSeq, len(id))
+			cur.spec, cur.raw, cur.phase, cur.polls = prevSpec, prevRaw, Healthy, 0
+		}
+	}
 	writeJSON(w, map[string]any{"EvalID": "ev1", "JobModifyIndex": cur.modifyIndex, "Warnings": ""})
 }
 

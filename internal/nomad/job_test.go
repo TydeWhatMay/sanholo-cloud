@@ -324,3 +324,42 @@ func TestJobCarriesNoSecret(t *testing.T) {
 		t.Errorf("the rendered job contains %q", bad)
 	}
 }
+
+const testDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestJobPinsTheImageDigest(t *testing.T) {
+	s := nomadfake.Settings()
+	plain, err := nomad.BuildJobPinned(s, "acme", "0.7.1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := nomad.BuildJobPinned(s, "acme", "0.7.1", testDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := func(j nomad.Job) any { return j.TaskGroups[0].Tasks[0].Config["image"] }
+	if got := image(plain); got != "ghcr.io/tydewhatmay/sanholo:v0.7.1" {
+		t.Errorf("unpinned image = %v", got)
+	}
+	if got := image(pinned); got != "ghcr.io/tydewhatmay/sanholo@"+testDigest {
+		t.Errorf("pinned image = %v, want the repository at the digest", got)
+	}
+	if pinned.Meta[nomad.MetaVersion] != "0.7.1" {
+		t.Errorf("the version left the meta: %v", pinned.Meta)
+	}
+	if pinned.Meta[nomad.MetaSpec] == plain.Meta[nomad.MetaSpec] {
+		t.Error("a digest does not change the spec hash, so a pin would never be registered")
+	}
+	// BuildJob is the unpinned form.
+	if j, _ := nomad.BuildJob(s, "acme", "0.7.1"); j.Meta[nomad.MetaSpec] != plain.Meta[nomad.MetaSpec] {
+		t.Error("BuildJob and an empty digest differ")
+	}
+}
+
+func TestJobRefusesABadDigest(t *testing.T) {
+	for _, d := range []string{"sha256:abc", "md5:" + strings.Repeat("a", 64), testDigest + "0", strings.ToUpper(testDigest), "sha256:" + strings.Repeat("g", 64), " " + testDigest} {
+		if _, err := nomad.BuildJobPinned(nomadfake.Settings(), "acme", "0.7.1", d); err == nil {
+			t.Errorf("digest %q was accepted", d)
+		}
+	}
+}

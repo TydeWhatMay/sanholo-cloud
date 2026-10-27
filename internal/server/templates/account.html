@@ -4,7 +4,7 @@
 {{if not .GameAvailable}}<p>Connecting a game account is not available here.</p>
 {{else}}{{if .Game}}<p>Connected to the replicant <strong>{{.Game.Name}}</strong> ({{.Game.Code}}) on {{.Game.Connected}}.</p>
 {{with .Instance}}<div id="instance"{{if .Starting}} hx-get="/account" hx-trigger="every 5s" hx-select="#instance" hx-target="#instance" hx-swap="outerHTML"{{end}}>
-<p>Bot: <strong>{{.Label}}</strong>.{{if .Detail}} {{.Detail}}{{end}}</p>
+<p>Bot: <strong>{{.Label}}</strong>.{{if .Detail}} {{.Detail}}{{end}}{{if .Version}} <span class="muted">Version {{.Version}}.</span>{{end}}</p>
 {{if .CanRetry}}<form method="post" action="/account/instance/retry">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button type="submit">Start the bot again</button>

@@ -402,6 +402,21 @@ func VolumeName(tenantID string) string { return JobPrefix + tenantID }
 // Image is the image reference of a version.
 func (s JobSettings) Image(version string) string { return s.ImageRepo + ":v" + version }
 
+var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ValidDigest reports whether d is an image digest (sha256:<64 hex>).
+func ValidDigest(d string) bool { return digestRE.MatchString(d) }
+
+// ImageRef is the image the job runs: the tag of the version, or, when the
+// release has a digest, the repository pinned to that digest, so a tag that is
+// moved later cannot change what runs. The version stays in the job meta.
+func (s JobSettings) ImageRef(version, digest string) string {
+	if digest != "" {
+		return s.ImageRepo + "@" + digest
+	}
+	return s.Image(version)
+}
+
 // Args are the client's arguments: the image's default command is
 // "serve -hosted", and Nomad's args replace it, so they start with it.
 // ${NOMAD_SECRETS_DIR} and ${NOMAD_TASK_DIR} are interpolated by Nomad.
@@ -432,12 +447,22 @@ func (s JobSettings) Args(tenantID string) []string {
 // name and the public URL). The result is deterministic: MetaSpec holds the
 // hash of everything else, so re-registering an unchanged job is skipped.
 func BuildJob(s JobSettings, tenantID, version string) (Job, error) {
+	return BuildJobPinned(s, tenantID, version, "")
+}
+
+// BuildJobPinned is BuildJob for a release that carries an image digest: a
+// non-empty digest makes the task run image@digest. The digest is part of the
+// spec hash, so adding or changing one is a new registration.
+func BuildJobPinned(s JobSettings, tenantID, version, digest string) (Job, error) {
 	if !tenant.Valid(tenantID) {
 		return Job{}, ErrInvalidJob
 	}
 	v, err := NormalizeVersion(version)
 	if err != nil {
 		return Job{}, err
+	}
+	if digest != "" && !ValidDigest(digest) {
+		return Job{}, errors.New("image digest: want sha256:<64 hex digits>")
 	}
 	if err := s.Validate(); err != nil {
 		return Job{}, fmt.Errorf("job settings: %w", err)
@@ -473,7 +498,7 @@ func BuildJob(s JobSettings, tenantID, version string) (Job, error) {
 			Tasks: []Task{{
 				Name: TaskName, Driver: "docker",
 				Config: map[string]any{
-					"image":        s.Image(v),
+					"image":        s.ImageRef(v, digest),
 					"args":         s.Args(tenantID),
 					"cap_drop":     []string{"ALL"},
 					"security_opt": []string{"no-new-privileges"},

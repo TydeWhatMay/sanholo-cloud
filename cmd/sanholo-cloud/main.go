@@ -26,6 +26,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/proxy"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
+	"github.com/lhaig/sanholo-cloud/internal/updater"
 )
 
 // version is set at build time (-ldflags "-X main.version=1.2.3"); it goes
@@ -35,6 +36,12 @@ var version = "dev"
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "operator" {
 		if err := runOperator(context.Background(), os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "release" {
+		if err := runRelease(context.Background(), os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -100,6 +107,13 @@ func main() {
 		log.Print("provisioning: NOMAD_ADDR not set; tenant bots are not started")
 	}
 
+	upd := updater.New(pool, prov, updater.Options{
+		BatchSize: cfg.Nomad.RolloutBatch, HealthTimeout: cfg.Nomad.RolloutTimeout, Logger: slog.Default(),
+	})
+	if prov.Enabled() {
+		go upd.Run(ctx, 10*time.Second)
+	}
+
 	var wa *webauthn.WebAuthn
 	if cfg.WebAuthn.Enabled() {
 		wa, err = auth.NewWebAuthn(cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, cfg.WebAuthn.RPName)
@@ -129,6 +143,7 @@ func main() {
 
 	adm := admin.New(pool, svc)
 	adm.SetProvisioner(prov)
+	adm.SetUpdater(upd)
 	web := &server.App{Auth: svc, Admin: adm, Connect: conn, Provision: prov, TrustedProxies: cfg.TrustedProxies}
 	if cfg.ProxyKey != nil {
 		appURL, err := url.Parse(cfg.AppBaseURL)

@@ -35,7 +35,7 @@ func TestAdminAccess(t *testing.T) {
 	user := e.signedIn(t, "user@example.org")
 	addPasskey(t, user)
 
-	for _, path := range []string{"/admin", "/admin/waitlist", "/admin/audit"} {
+	for _, path := range []string{"/admin", "/admin/waitlist", "/admin/audit", "/admin/releases"} {
 		cases := []struct {
 			name   string
 			c      *client

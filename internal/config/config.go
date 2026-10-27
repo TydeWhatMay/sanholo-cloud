@@ -96,6 +96,11 @@ type Nomad struct {
 	Version string
 	// Timeout is how long an instance may take to become healthy.
 	Timeout time.Duration
+	// RolloutBatch is how many tenants an update moves together after the
+	// canary; RolloutTimeout is how long one may take to become healthy on
+	// the new version (default: Timeout).
+	RolloutBatch   int
+	RolloutTimeout time.Duration
 }
 
 // Enabled reports whether tenant jobs will be registered.
@@ -330,14 +335,15 @@ func qmSettings(getenv func(string) string, production bool) (QM, error) {
 //	sanholo), NOMAD_REGION, NOMAD_DATACENTERS (default dc1), NOMAD_HOST_NETWORK,
 //	SANHOLO_IMAGE_VERSION, SANHOLO_IMAGE_REPO, TENANT_PROXY_PUBLIC_KEYS or
 //	TENANT_PROXY_PUBLIC_KEYS_FILE, TENANT_DOMAIN, TENANT_ALERT_URL,
-//	VAPID_PUBLIC_KEY, TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT.
+//	VAPID_PUBLIC_KEY, TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT,
+//	ROLLOUT_BATCH_SIZE (default 5), ROLLOUT_HEALTH_TIMEOUT (default PROVISION_TIMEOUT).
 func nomadSettings(getenv func(string) string, appBase, qmAddr string, production bool, key ed25519.PrivateKey) (Nomad, error) {
 	n := Nomad{Client: nomad.Config{
 		Addr: getenv("NOMAD_ADDR"), Token: getenv("NOMAD_TOKEN"), TokenFile: getenv("NOMAD_TOKEN_FILE"),
 		Namespace: getenv("NOMAD_NAMESPACE"), Region: getenv("NOMAD_REGION"),
 	}}
 	if n.Client.Addr == "" {
-		for _, name := range []string{"NOMAD_TOKEN", "NOMAD_TOKEN_FILE", "NOMAD_NAMESPACE", "NOMAD_REGION", "NOMAD_DATACENTERS", "SANHOLO_IMAGE_VERSION"} {
+		for _, name := range []string{"NOMAD_TOKEN", "NOMAD_TOKEN_FILE", "NOMAD_NAMESPACE", "NOMAD_REGION", "NOMAD_DATACENTERS", "SANHOLO_IMAGE_VERSION", "ROLLOUT_BATCH_SIZE", "ROLLOUT_HEALTH_TIMEOUT"} {
 			if getenv(name) != "" {
 				return Nomad{}, fmt.Errorf("%s is set but NOMAD_ADDR is not", name)
 			}
@@ -405,6 +411,19 @@ func nomadSettings(getenv func(string) string, appBase, qmAddr string, productio
 			errs = append(errs, errors.New("PROVISION_TIMEOUT: want a duration from 1m to 6h"))
 		}
 		n.Timeout = d
+	}
+	n.RolloutBatch, n.RolloutTimeout = 5, n.Timeout
+	if err := positiveInt(getenv, "ROLLOUT_BATCH_SIZE", &n.RolloutBatch); err != nil {
+		errs = append(errs, err)
+	} else if n.RolloutBatch > 50 {
+		errs = append(errs, errors.New("ROLLOUT_BATCH_SIZE: want 1 to 50"))
+	}
+	if v := getenv("ROLLOUT_HEALTH_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > 6*time.Hour {
+			errs = append(errs, errors.New("ROLLOUT_HEALTH_TIMEOUT: want a duration from 1m to 6h"))
+		}
+		n.RolloutTimeout = d
 	}
 	// Validate only once every input is in: a missing key would repeat as a
 	// second error.

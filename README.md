@@ -41,6 +41,7 @@ for them.
 | `TENANT_PROXY_PUBLIC_KEYS`, `TENANT_PROXY_PUBLIC_KEYS_FILE` | With `PROXY_SIGNING_KEY`: optional, the next public key during a rotation (PEM, or base64 one per line), added after the signing key's own. Without it (development, proxy off): the proxy's public key(s), exactly one of the two. |
 | `TENANT_DOMAIN`, `TENANT_ALERT_URL`, `VAPID_PUBLIC_KEY` | Parent domain of the Bridge hosts (default `sanholo.space` once Nomad is configured; required with `PROXY_SIGNING_KEY` otherwise), alert endpoint (default `APP_BASE_URL/internal/alerts`) and the Web Push public key handed to the bots. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ`, `PROVISION_TIMEOUT` | Bot resources (384, 300) and how long a bot may take to become healthy (15m). |
+| `ROLLOUT_BATCH_SIZE`, `ROLLOUT_HEALTH_TIMEOUT` | How many tenants an update moves together after the canary (5, 1 to 50) and how long one may take to become healthy on the new version (default `PROVISION_TIMEOUT`; 1m to 6h). |
 | `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
 | `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
 | `WEBAUTHN_RP_NAME` | Name shown by the authenticator. Default `SanHolo`. |
@@ -179,6 +180,46 @@ disconnect and delete use it. The job carries no secret: the bot's game token
 comes from qm through the Nomad workload identity. The Nomad client
 (`internal/nomad`) only touches jobs named `sanholo-tenant-<valid tenant id>`.
 What the platform must provide is in `deploy/README.md`.
+
+### Updates (releases and rollouts)
+
+The operator adds a client release, then starts its rollout (`internal/updater`).
+Releases come from the command line or `/admin/releases`; nothing polls GitHub
+(a possible follow-up: read the release and its digest from the `san-holo`
+release notes). Every action writes its audit row in the same transaction.
+
+```sh
+sanholo-cloud release add v0.8.0 [--digest sha256:...] [--notes text] [--url https://...]
+sanholo-cloud release start v0.8.0     # plans the rollout; the running service carries it out
+sanholo-cloud release list
+sanholo-cloud release resume | abandon # for a halted rollout
+sanholo-cloud release canary <tenant-id>|none
+```
+
+With a digest the tenant job runs `image@digest`; without, `image:vX.Y.Z`.
+A rollout moves one canary tenant first (the tenant marked with `release canary`,
+else the oldest that has to move), waits for it to be healthy on the new version
+(Nomad's deployment verdict for the new job version), then moves batches of 5
+(`ROLLOUT_BATCH_SIZE`), each waiting for the one before. Tenants that are
+suspended, stopped or not running are recorded as skipped and not touched; a
+tenant already on the release counts as done. The state is in PostgreSQL
+(`releases`, `rollout_tenants`), so a restarted control plane resumes where the
+last one stopped, repeating a step is harmless (a spec Nomad already holds is not
+registered again), and the database allows one rollout (rolling or halted) at a
+time. A release becomes the fleet target, the version new instances and stopped
+instances starting again use, when its rollout is done; a rollout of the target
+again acts as a catch-up for tenants that were skipped.
+
+Any failure (a failed deployment, a deployment Nomad reverted itself, the health
+timeout, a registration Nomad refuses) halts the rollout. The tenant that failed
+and any tenant of the same batch still updating are put back on their previous
+version by registering the previous spec again (a no-op when Nomad's
+`auto_revert` already did it) and the revert counts once Nomad reports the old
+version healthy; tenants not yet reached are never touched. The release shows the
+tenant and a fixed reason, never Nomad's text. A halted rollout waits for the
+operator: resume (the tenants that were reverted are tried again) or abandon
+(tenants already on the new version stay there). The account page shows the
+bot's version.
 
 ### Bridge access and the proxy
 

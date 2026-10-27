@@ -1,0 +1,58 @@
+<h1>Admin</h1>
+{{template "admin_nav" .}}
+<h2>Releases</h2>
+<p>Fleet target: <strong>{{.Target}}</strong>. New bots start at the target. A release becomes the target when its rollout is done.</p>
+{{if .Releases}}<table>
+<tr><th>Version</th><th>Image</th><th>Added</th><th>State</th><th>Notes</th><th></th></tr>
+{{range .Releases}}<tr>
+<td>v{{.Version}}{{if .Target}} (target){{end}}</td>
+<td>{{if .Digest}}{{.Digest}}{{else}}<span class="muted">tag</span>{{end}}</td>
+<td>{{.Added}}</td>
+<td>{{.State}}{{if .Halted}}: {{.HaltedTenant}}, {{.HaltReason}}{{end}}</td>
+<td>{{.Notes}}{{if .URL}} <a href="{{.URL}}" rel="noopener noreferrer">link</a>{{end}}</td>
+<td>{{if .CanStart}}<form method="post" action="/admin/releases/{{.Version}}/start">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button class="plain" type="submit">Start rollout</button>
+</form>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}<p>There are no releases.</p>{{end}}
+{{if .Halted}}<p>The rollout is halted. The tenant that failed was put back on its previous version, and the tenants not yet reached were not touched.</p>
+<form method="post" action="/admin/releases/resume">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit">Resume the rollout</button>
+</form>
+<form method="post" action="/admin/releases/abandon">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button class="plain" type="submit">Abandon the rollout</button>
+</form>{{end}}
+{{if .Progress}}<h2>Rollout of {{.Shown}}</h2>
+<table>
+<tr><th>Tenant</th><th>Step</th><th>State</th><th>Was on</th><th>Reason</th></tr>
+{{range .Progress}}<tr>
+<td>{{.Tenant}}</td>
+<td>{{.Batch}}</td>
+<td>{{.State}}</td>
+<td>{{.From}}</td>
+<td>{{.Reason}}</td>
+</tr>
+{{end}}
+</table>
+{{end}}
+<h2>Add a release</h2>
+<form method="post" action="/admin/releases/add" autocomplete="off">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><label for="rel-version">Version</label> <input id="rel-version" name="version" required maxlength="40" placeholder="0.7.1"></p>
+<p><label for="rel-digest">Image digest (optional)</label> <input id="rel-digest" name="digest" maxlength="80" placeholder="sha256:..."></p>
+<p><label for="rel-url">Release link (optional)</label> <input id="rel-url" name="url" maxlength="300" placeholder="https://..."></p>
+<p><label for="rel-notes">Notes (optional)</label> <input id="rel-notes" name="notes" maxlength="2000"></p>
+<button type="submit">Add the release</button>
+</form>
+<h2>Canary tenant</h2>
+<p>A rollout moves one tenant first. Without a canary tenant it uses the oldest tenant that has to move.</p>
+<form method="post" action="/admin/releases/canary" autocomplete="off">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><label for="canary-tenant">Tenant id (empty clears it)</label> <input id="canary-tenant" name="tenant" maxlength="63"></p>
+<button type="submit">Set the canary</button>
+</form>

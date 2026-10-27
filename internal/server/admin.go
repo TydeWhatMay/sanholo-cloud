@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
+	"github.com/lhaig/sanholo-cloud/internal/updater"
 )
 
 const timeFmt = "2006-01-02 15:04 UTC"
@@ -21,6 +24,11 @@ var adminNotices = map[string]string{
 	"suspend":   "The tenant is suspended.",
 	"unsuspend": "The tenant is active again.",
 	"restart":   "The bot is restarting.",
+	"release":   "The release is added.",
+	"rollout":   "The rollout is started.",
+	"resume":    "The rollout is resumed.",
+	"abandon":   "The rollout is abandoned.",
+	"canary":    "The canary tenant is set.",
 }
 
 func (a *App) mountAdmin(app *fiber.App) {
@@ -36,6 +44,12 @@ func (a *App) mountAdmin(app *fiber.App) {
 	adm.Post("/tenants/:id/suspend", a.adminTenantAction("suspend", a.Admin.Suspend))
 	adm.Post("/tenants/:id/unsuspend", a.adminTenantAction("unsuspend", a.Admin.Unsuspend))
 	adm.Post("/tenants/:id/restart", a.adminTenantAction("restart", a.Admin.RestartInstance))
+	adm.Get("/releases", a.adminReleases)
+	adm.Post("/releases/add", a.adminReleaseAdd)
+	adm.Post("/releases/canary", a.adminCanary)
+	adm.Post("/releases/resume", a.adminRolloutAction("resume", func(ctx context.Context, actor, _ string) error { return a.Admin.ResumeRollout(ctx, actor) }))
+	adm.Post("/releases/abandon", a.adminRolloutAction("abandon", func(ctx context.Context, actor, _ string) error { return a.Admin.AbandonRollout(ctx, actor) }))
+	adm.Post("/releases/:version/start", a.adminRolloutAction("rollout", a.Admin.StartRollout))
 }
 
 // requireOperator answers anyone who is not an operator exactly as it
@@ -159,10 +173,100 @@ func (a *App) adminError(c *fiber.Ctx, err error) error {
 		return a.message(c, fiber.StatusBadGateway, "Restart not carried out", "The restart was recorded, but Nomad did not carry it out. The instance state shows what happened.")
 	case errors.Is(err, admin.ErrOwnTenant):
 		return a.message(c, fiber.StatusConflict, "No change made", "You cannot suspend your own tenant.")
+	case errors.Is(err, admin.ErrRolloutActive):
+		return a.message(c, fiber.StatusConflict, "No change made", "Another rollout is rolling or halted. Finish it, or abandon it, first.")
+	case errors.Is(err, admin.ErrReleaseExists):
+		return a.message(c, fiber.StatusConflict, "No change made", "That release is already added.")
+	case errors.Is(err, admin.ErrReleaseInvalid):
+		return a.message(c, fiber.StatusBadRequest, "Check the release", "The version, digest, notes or link is not valid. A digest looks like sha256: followed by 64 hex digits, and a link starts with https://.")
 	case errors.Is(err, auth.ErrAccountExists):
 		return a.message(c, fiber.StatusConflict, "No change made", "An account already exists for this address.")
 	case isInputError(err):
 		return a.message(c, fiber.StatusBadRequest, "Check the email address", "That is not a valid email address.")
 	}
 	return a.serverError(c)
+}
+
+// releaseRow is one release on the releases page.
+type releaseRow struct {
+	Version, Digest, State, Added, Notes, URL string
+	Target, CanStart, Halted                  bool
+	HaltedTenant, HaltReason                  string
+}
+
+type rolloutRow struct {
+	Tenant, State, Reason, From string
+	Batch                       string
+}
+
+func (a *App) adminReleases(c *fiber.Ctx) error {
+	list, err := a.Admin.Releases(c.UserContext())
+	if err != nil {
+		return a.serverError(c)
+	}
+	rows := make([]releaseRow, 0, len(list))
+	target, shown := "none yet", ""
+	var showRel *updater.Release
+	for i, r := range list {
+		row := releaseRow{
+			Version: r.Version, Digest: r.Digest, State: r.State, Added: r.CreatedAt.UTC().Format(timeFmt),
+			Notes: r.Notes, URL: r.URL, Target: r.IsTarget,
+			CanStart: r.State == updater.StateAvailable || r.State == updater.StateDone,
+			Halted:   r.State == updater.StateHalted, HaltedTenant: r.HaltedTenant, HaltReason: r.HaltReason,
+		}
+		if r.IsTarget {
+			target = "v" + r.Version
+		}
+		// The rollout shown is the active one, else the one that made the
+		// current target.
+		if r.State == updater.StateRolling || r.State == updater.StateHalted || (showRel == nil && r.IsTarget) {
+			showRel = &list[i]
+		}
+		rows = append(rows, row)
+	}
+	var progress []rolloutRow
+	var halted bool
+	if showRel != nil {
+		shown = "v" + showRel.Version + " (" + showRel.State + ")"
+		halted = showRel.State == updater.StateHalted
+		pr, err := a.Admin.RolloutRows(c.UserContext(), showRel.Version)
+		if err != nil {
+			return a.serverError(c)
+		}
+		for _, r := range pr {
+			batch := "batch " + strconv.Itoa(r.Batch)
+			if r.Batch == 0 {
+				batch = "canary"
+			}
+			progress = append(progress, rolloutRow{Tenant: r.TenantID, State: r.State, Reason: r.Reason, From: "v" + r.PreviousVersion, Batch: batch})
+		}
+	}
+	return a.adminPage(c, "admin_releases", "Releases", fiber.Map{
+		"Releases": rows, "Target": target, "Shown": shown, "Progress": progress, "Halted": halted,
+	})
+}
+
+func (a *App) adminReleaseAdd(c *fiber.Ctx) error {
+	if err := a.Admin.AddRelease(c.UserContext(), actorOf(c), c.FormValue("version"), c.FormValue("digest"), c.FormValue("notes"), c.FormValue("url")); err != nil {
+		return a.adminError(c, err)
+	}
+	return c.Redirect("/admin/releases?done=release", fiber.StatusSeeOther)
+}
+
+func (a *App) adminCanary(c *fiber.Ctx) error {
+	if err := a.Admin.SetCanary(c.UserContext(), actorOf(c), strings.TrimSpace(c.FormValue("tenant"))); err != nil {
+		return a.adminError(c, err)
+	}
+	return c.Redirect("/admin/releases?done=canary", fiber.StatusSeeOther)
+}
+
+// adminRolloutAction runs a rollout action; the release version, when the
+// action needs one, is the :version path parameter.
+func (a *App) adminRolloutAction(done string, do func(ctx context.Context, actor, version string) error) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if err := do(c.UserContext(), actorOf(c), c.Params("version")); err != nil {
+			return a.adminError(c, err)
+		}
+		return c.Redirect("/admin/releases?done="+url.QueryEscape(done), fiber.StatusSeeOther)
+	}
 }

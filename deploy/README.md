@@ -104,8 +104,11 @@ The control plane serves both the app and every Bridge, told apart by the
 
 `ghcr.io/tydewhatmay/sanholo:vX.Y.Z` is public, so Nomad pulls without registry
 credentials. `SANHOLO_IMAGE_VERSION` (for example `0.7.1`) is the version new
-instances start at. An existing instance keeps its own version; the updater
-(task 2.5) moves it.
+instances start at until a rollout has finished; after that the fleet target (the
+last release whose rollout is done) is the version a new instance starts at. An
+existing instance keeps its own version; the updater moves it. Releases are added
+by the operator (`sanholo-cloud release add vX.Y.Z --digest sha256:...`; the digest
+is in the client release notes) and make the job run `image@digest`.
 
 ## 5. Control plane environment
 
@@ -123,6 +126,7 @@ instances start at. An existing instance keeps its own version; the updater
 | `VAPID_PUBLIC_KEY` | Optional Web Push public key passed to the bots. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ` | Default 384 and 300. |
 | `PROVISION_TIMEOUT` | How long a bot may take to become healthy. Default 15m. |
+| `ROLLOUT_BATCH_SIZE`, `ROLLOUT_HEALTH_TIMEOUT` | Tenants per update batch (default 5) and how long one may take to be healthy on the new version (default `PROVISION_TIMEOUT`). The job's own update stanza (`auto_revert`, healthy deadline 10m) still applies per tenant. |
 | `QM_ADDR` | Also given to each bot as `-qm-addr`. |
 
 No variable that holds a secret is ever copied into a job.

@@ -6,7 +6,6 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -14,9 +13,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lhaig/sanholo-cloud/internal/audit"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
+	"github.com/lhaig/sanholo-cloud/internal/updater"
 )
 
 // ActorCLI is the audit actor of the operator command line.
@@ -44,6 +45,7 @@ type Service struct {
 	pool *pgxpool.Pool
 	auth *auth.Service
 	prov *provision.Service
+	upd  *updater.Service
 	now  func() time.Time
 }
 
@@ -58,17 +60,8 @@ func (s *Service) SetProvisioner(p *provision.Service) { s.prov = p }
 
 // audit writes one row inside tx. details must not hold secrets.
 func (s *Service) audit(ctx context.Context, tx pgx.Tx, actor, action, target string, details map[string]any) error {
-	if details == nil {
-		details = map[string]any{}
-	}
-	raw, err := json.Marshal(details)
-	if err != nil {
-		return fmt.Errorf("admin: audit details: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO audit_log (at, actor, action, target, details) VALUES ($1, $2, $3, $4, $5)`,
-		s.now(), actor, action, target, raw); err != nil {
-		return fmt.Errorf("admin: audit: %w", err)
+	if err := audit.Write(ctx, tx, s.now(), actor, action, target, details); err != nil {
+		return fmt.Errorf("admin: %w", err)
 	}
 	return nil
 }

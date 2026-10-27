@@ -153,3 +153,42 @@ func TestLoadNomadKeysFromFile(t *testing.T) {
 		t.Error("the key file was not read")
 	}
 }
+
+func TestLoadRolloutSettings(t *testing.T) {
+	c, err := Load(env(nomadEnv("APP_BASE_URL", "https://app.sanholo.space")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Nomad.RolloutBatch != 5 || c.Nomad.RolloutTimeout != 15*time.Minute {
+		t.Errorf("defaults = %d, %v; want 5 and the provisioning timeout", c.Nomad.RolloutBatch, c.Nomad.RolloutTimeout)
+	}
+	c, err = Load(env(nomadEnv("APP_BASE_URL", "https://app.sanholo.space", "PROVISION_TIMEOUT", "20m")))
+	if err != nil || c.Nomad.RolloutTimeout != 20*time.Minute {
+		t.Errorf("the rollout timeout does not follow PROVISION_TIMEOUT: %v, %v", c.Nomad.RolloutTimeout, err)
+	}
+	c, err = Load(env(nomadEnv("APP_BASE_URL", "https://app.sanholo.space", "ROLLOUT_BATCH_SIZE", "3", "ROLLOUT_HEALTH_TIMEOUT", "40m")))
+	if err != nil || c.Nomad.RolloutBatch != 3 || c.Nomad.RolloutTimeout != 40*time.Minute {
+		t.Errorf("overrides = %d, %v, %v", c.Nomad.RolloutBatch, c.Nomad.RolloutTimeout, err)
+	}
+}
+
+func TestLoadRolloutSettingsRefusals(t *testing.T) {
+	for _, tc := range []struct{ name, value, want string }{
+		{"ROLLOUT_BATCH_SIZE", "0", "ROLLOUT_BATCH_SIZE"},
+		{"ROLLOUT_BATCH_SIZE", "many", "ROLLOUT_BATCH_SIZE"},
+		{"ROLLOUT_BATCH_SIZE", "51", "ROLLOUT_BATCH_SIZE"},
+		{"ROLLOUT_HEALTH_TIMEOUT", "10s", "ROLLOUT_HEALTH_TIMEOUT"},
+		{"ROLLOUT_HEALTH_TIMEOUT", "7h", "ROLLOUT_HEALTH_TIMEOUT"},
+		{"ROLLOUT_HEALTH_TIMEOUT", "soon", "ROLLOUT_HEALTH_TIMEOUT"},
+	} {
+		_, err := Load(env(nomadEnv("APP_BASE_URL", "https://app.sanholo.space", tc.name, tc.value)))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s=%s: error %v", tc.name, tc.value, err)
+		}
+	}
+	// Without NOMAD_ADDR the settings have nothing to configure.
+	m := map[string]string{"DATABASE_URL": "postgres://u:p@h/d", "ROLLOUT_BATCH_SIZE": "3"}
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "ROLLOUT_BATCH_SIZE") {
+		t.Errorf("ROLLOUT_BATCH_SIZE without NOMAD_ADDR: %v", err)
+	}
+}

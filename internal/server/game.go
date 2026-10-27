@@ -166,18 +166,19 @@ func (a *App) instanceView(c *fiber.Ctx) (fiber.Map, error) {
 	if inst == nil {
 		return fiber.Map{"Label": "Not started"}, nil
 	}
+	// Version is the release the bot runs, as the updater last set it.
 	switch inst.State {
 	case provision.StatePending:
-		return fiber.Map{"Label": "Starting", "Detail": "This can take a few minutes. The page updates by itself.", "Starting": true}, nil
+		return fiber.Map{"Label": "Starting", "Detail": "This can take a few minutes. The page updates by itself.", "Starting": true, "Version": inst.ImageVersion}, nil
 	case provision.StateRunning:
 		if inst.Health == provision.HealthUnhealthy {
-			return fiber.Map{"Label": "Running, not answering", "Detail": "The bot is not passing its health check. SanHolo is watching it.", "Open": true}, nil
+			return fiber.Map{"Label": "Running, not answering", "Detail": "The bot is not passing its health check. SanHolo is watching it.", "Open": true, "Version": inst.ImageVersion}, nil
 		}
-		return fiber.Map{"Label": "Running", "Open": true}, nil
+		return fiber.Map{"Label": "Running", "Open": true, "Version": inst.ImageVersion}, nil
 	case provision.StateFailed:
-		return fiber.Map{"Label": "Failed", "Detail": inst.FailureReason + ".", "CanRetry": true}, nil
+		return fiber.Map{"Label": "Failed", "Detail": inst.FailureReason + ".", "CanRetry": true, "Version": inst.ImageVersion}, nil
 	}
-	return fiber.Map{"Label": "Stopped"}, nil
+	return fiber.Map{"Label": "Stopped", "Version": inst.ImageVersion}, nil
 }
 
 // instanceRetry starts a failed bot again. Only a failed instance can be

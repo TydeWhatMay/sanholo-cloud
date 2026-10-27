@@ -168,9 +168,11 @@ func (s *Service) Wait() {
 
 // Instance is the non-secret record of a tenant's job.
 type Instance struct {
-	TenantID      string
-	JobID         string
-	ImageVersion  string
+	TenantID     string
+	JobID        string
+	ImageVersion string
+	// ImageDigest is the digest the job is pinned to, empty for the tag.
+	ImageDigest   string
 	State         string
 	Health        string
 	HealthAt      *time.Time
@@ -179,11 +181,11 @@ type Instance struct {
 	UpdatedAt     time.Time
 }
 
-const instanceCols = `tenant_id, job_id, image_version, state, last_health, last_health_at, failure_reason, requested_at, updated_at`
+const instanceCols = `tenant_id, job_id, image_version, image_digest, state, last_health, last_health_at, failure_reason, requested_at, updated_at`
 
 func scanInstance(row pgx.Row) (*Instance, error) {
 	var i Instance
-	err := row.Scan(&i.TenantID, &i.JobID, &i.ImageVersion, &i.State, &i.Health, &i.HealthAt, &i.FailureReason, &i.RequestedAt, &i.UpdatedAt)
+	err := row.Scan(&i.TenantID, &i.JobID, &i.ImageVersion, &i.ImageDigest, &i.State, &i.Health, &i.HealthAt, &i.FailureReason, &i.RequestedAt, &i.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -205,8 +207,11 @@ func (s *Service) Get(ctx context.Context, tenantID string) (*Instance, error) {
 // Start registers the tenant's job (if Nomad does not already have exactly
 // this one) and records the instance as pending. It is safe to repeat: an
 // instance that is already running stays running, and an unchanged job is
-// not registered again. A new instance starts at the configured version; an
-// existing one keeps the version it has, which belongs to the updater.
+// not registered again. A new instance starts at the fleet target (the
+// release the updater last finished rolling out; the configured version
+// before any release exists), and so does an instance that was stopped. A
+// running or failed one keeps the version it has, which belongs to the
+// updater.
 func (s *Service) Start(ctx context.Context, tenantID string) error {
 	return s.start(ctx, tenantID, false)
 }
@@ -233,28 +238,39 @@ func (s *Service) start(ctx context.Context, tenantID string, force bool) error 
 	case !hasGame:
 		return ErrNoGameAccount
 	}
-	version := s.version
-	if cur, err := s.Get(ctx, tenantID); err != nil {
+	version, digest := s.version, ""
+	cur, err := s.Get(ctx, tenantID)
+	if err != nil {
 		return err
-	} else if cur != nil {
-		version = cur.ImageVersion
 	}
-	job, err := nomad.BuildJob(s.set, tenantID, version)
+	tv, td, hasTarget, err := s.target(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case cur != nil && cur.State != StateStopped:
+		version, digest = cur.ImageVersion, cur.ImageDigest
+	case hasTarget:
+		version, digest = tv, td
+	case cur != nil:
+		version, digest = cur.ImageVersion, cur.ImageDigest
+	}
+	job, err := nomad.BuildJobPinned(s.set, tenantID, version, digest)
 	if err != nil {
 		return fmt.Errorf("provision: %w", err)
 	}
 	now := s.now()
 	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO tenant_instances (tenant_id, job_id, image_version, state, requested_at, created_at, updated_at)
-		VALUES ($1, $2, $3, 'pending', $4, $4, $4)
+		INSERT INTO tenant_instances (tenant_id, job_id, image_version, image_digest, state, requested_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $5, 'pending', $4, $4, $4)
 		ON CONFLICT (tenant_id) DO UPDATE SET
-		    job_id = EXCLUDED.job_id, image_version = EXCLUDED.image_version,
+		    job_id = EXCLUDED.job_id, image_version = EXCLUDED.image_version, image_digest = EXCLUDED.image_digest,
 		    state          = CASE WHEN tenant_instances.state = 'running' THEN 'running' ELSE 'pending' END,
 		    last_health    = CASE WHEN tenant_instances.state = 'running' THEN tenant_instances.last_health ELSE 'unknown' END,
 		    failure_reason = CASE WHEN tenant_instances.state = 'running' THEN tenant_instances.failure_reason ELSE '' END,
 		    requested_at   = CASE WHEN tenant_instances.state = 'running' THEN tenant_instances.requested_at ELSE EXCLUDED.requested_at END,
 		    updated_at     = EXCLUDED.updated_at`,
-		tenantID, job.ID, version, now); err != nil {
+		tenantID, job.ID, version, now, digest); err != nil {
 		return fmt.Errorf("provision: record instance: %w", err)
 	}
 	if err := s.ensureJob(ctx, job, force); err != nil {
