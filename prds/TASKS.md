@@ -39,7 +39,7 @@ External dependencies, and how each phase copes with them:
 
 | # | Task | PRD | Status | Notes |
 |---|------|-----|--------|-------|
-| 3.1 | US-016 delivery: `/push/subscribe`, VAPID keys from qm, `POST /internal/alerts` verifying the Nomad workload JWT (aud `sanholo.cloud`, tenant from job id) against Nomad's JWKS, Web Push send with per-tenant cap. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 2.3 |
+| 3.1 | US-016 delivery: `/push/subscribe`, VAPID keys from qm, `POST /internal/alerts` verifying the Nomad workload JWT (aud `sanholo.cloud`, tenant from job id) against Nomad's JWKS, Web Push send with per-tenant cap. | [prd](backlog/prd-sanholo-saas.md) | ACTIVE | needs 2.3 |
 | 3.2 | US-017 export (ZIP, single-use link, 24 h, no token) and US-019 disconnect. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 2.1-2.3 |
 | 3.3 | US-018 delete account with schema-derived verification (no rows, no qm path, no volume). | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 3.2 |
 | 3.4 | US-022 backups and restore runbook, US-023 monitoring and operator alerts (deploy/ + docs); coordinate with the infra session. | [prd](backlog/prd-sanholo-saas.md) | TODO | infra |
