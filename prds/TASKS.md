@@ -33,7 +33,7 @@ External dependencies, and how each phase copes with them:
 | 2.2 | US-011 connect a game account: validate the token with one game read, store via `secrets`, refuse an account already connected elsewhere (by account id), one account per tenant in the beta, create-account flow queued if registration is per IP. | [prd](backlog/prd-sanholo-saas.md) | DONE | needs 2.1 |
 | 2.3 | US-012 provisioning through the Nomad HTTP API: job template (one task, image `ghcr.io/tydewhatmay/sanholo:vX.Y.Z`, two identity blocks `qm.sanholo` + `sanholo.cloud`, kill_timeout 20 s, health check on /healthz with warm-up grace), golden test, register/poll/stop, namespace-scoped token; fake Nomad. | [prd](backlog/prd-sanholo-saas.md) | DONE | needs 2.2 |
 | 2.4 | US-015 authenticating proxy: per-tenant subdomain routing, Ed25519 identity per request (format in the handoff notes), strip client copies, one-time handoff code to a host-only Bridge cookie, CSRF headers passed through, security headers. | [prd](backlog/prd-sanholo-saas.md) | DONE | needs 1.3, 2.3 |
-| 2.5 | US-021 updater: releases table, canary then batches of 5 with health waits, halt + revert on failure, idempotent; fake Nomad. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 2.3 |
+| 2.5 | US-021 updater: releases table, canary then batches of 5 with health waits, halt + revert on failure, idempotent; fake Nomad. | [prd](backlog/prd-sanholo-saas.md) | ACTIVE | needs 2.3 |
 
 ## Phase 3: Notifications, data rights, operations
 
