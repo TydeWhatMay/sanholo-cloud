@@ -160,13 +160,21 @@ func TestLoadHostedSettings(t *testing.T) {
 		}
 		return m
 	}
+	// withKeys returns m with the key/value pairs applied (an empty value
+	// removes the key).
+	withKeys := func(m map[string]string, kv ...string) map[string]string {
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
 	// prodEnv is a complete production environment with one key replaced
 	// (an empty value removes it).
 	prodEnv := func(key, val string) map[string]string {
 		m := map[string]string{
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw",
 			"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8",
-			"QM_ADDR": "https://qm.sanholo.space", "QM_TOKEN_FILE": "/run/secrets/qm-token",
+			"QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "role-1", "QM_SECRET_ID_FILE": "/run/secrets/qm-secret-id",
 		}
 		if key != "" {
 			m[key] = val
@@ -216,7 +224,7 @@ func TestLoadHostedSettings(t *testing.T) {
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_PORT": "465",
 			"SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw", "SMTP_FROM": "SanHolo <no-reply@sanholo.space>",
 			"APP_BASE_URL": "https://app.sanholo.space", "WEBAUTHN_RP_ID": "app.sanholo.space",
-			"TRUSTED_PROXIES": "10.0.0.0/8", "QM_ADDR": "https://qm.sanholo.space", "QM_TOKEN": "t",
+			"TRUSTED_PROXIES": "10.0.0.0/8", "QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "r", "QM_SECRET_ID": "s",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)
@@ -227,7 +235,7 @@ func TestLoadHostedSettings(t *testing.T) {
 		{"production refuses http base url", with(prodEnv("APP_BASE_URL", "http://localhost:8090")), "APP_BASE_URL", nil},
 		{"production needs smtp username", with(prodEnv("SMTP_USERNAME", "")), "SMTP_USERNAME", nil},
 		{"production complete", with(prodEnv("", "")), "", func(t *testing.T, c Config) {
-			if c.QM != (QM{Addr: "https://qm.sanholo.space", TokenFile: "/run/secrets/qm-token"}) {
+			if c.QM != (QM{Addr: "https://qm.sanholo.space", RoleID: "role-1", SecretIDFile: "/run/secrets/qm-secret-id"}) {
 				t.Errorf("QM = %+v", c.QM)
 			}
 		}},
@@ -248,6 +256,21 @@ func TestLoadHostedSettings(t *testing.T) {
 		{"qm token and file both", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_TOKEN": "t", "QM_TOKEN_FILE": "/x"}), "exactly one", nil},
 		{"qm token without addr", with(map[string]string{"QM_TOKEN": "t"}), "QM_ADDR", nil},
 		{"qm token file without addr", with(map[string]string{"QM_TOKEN_FILE": "/x"}), "QM_ADDR", nil},
+		{"qm approle in development", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_ROLE_ID": "r", "QM_SECRET_ID": "s"}), "", func(t *testing.T, c Config) {
+			if c.QM != (QM{Addr: "https://qm.example.org", RoleID: "r", SecretID: "s"}) {
+				t.Errorf("QM = %+v", c.QM)
+			}
+		}},
+		{"qm approle secret id file", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_ROLE_ID": "r", "QM_SECRET_ID_FILE": "/x"}), "", nil},
+		{"qm role without secret id", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_ROLE_ID": "r"}), "QM_SECRET_ID", nil},
+		{"qm secret id without role", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_SECRET_ID": "s"}), "QM_ROLE_ID", nil},
+		{"qm secret id and file both", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_ROLE_ID": "r", "QM_SECRET_ID": "s", "QM_SECRET_ID_FILE": "/x"}), "exactly one", nil},
+		{"qm approle and token both", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_ROLE_ID": "r", "QM_SECRET_ID": "s", "QM_TOKEN": "t"}), "not both", nil},
+		{"qm role id without addr", with(map[string]string{"QM_ROLE_ID": "r", "QM_SECRET_ID": "s"}), "QM_ADDR", nil},
+		{"production needs a role id", with(prodEnv("QM_ROLE_ID", "")), "QM_ROLE_ID", nil},
+		{"production refuses static token", with(withKeys(prodEnv("", ""), "QM_ROLE_ID", "", "QM_SECRET_ID_FILE", "", "QM_TOKEN", "t")), "refused", nil},
+		{"production refuses static token file", with(withKeys(prodEnv("", ""), "QM_TOKEN_FILE", "/x")), "refused", nil},
+		{"production needs a secret id", with(prodEnv("QM_SECRET_ID_FILE", "")), "QM_SECRET_ID", nil},
 		{"username needs password", with(map[string]string{"SMTP_HOST": "h", "SMTP_USERNAME": "u"}), "SMTP_PASSWORD", nil},
 		{"bad port", with(map[string]string{"SMTP_HOST": "h", "SMTP_PORT": "x"}), "SMTP_PORT", nil},
 		{"line break in from", with(map[string]string{"SMTP_HOST": "h", "SMTP_FROM": "a@b.c\r\nBcc: x@y.z"}), "SMTP_FROM", nil},

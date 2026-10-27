@@ -56,13 +56,18 @@ type SMTP struct {
 	From     string
 }
 
-// QM holds the qm connection. Token is a secret: never log or print a
-// Config. At most one of Token and TokenFile is set; TokenFile is re-read
-// on every request.
+// QM holds the qm connection. SecretID and Token are secrets: never log or
+// print a Config. The production identity is the AppRole: RoleID plus
+// exactly one of SecretID and SecretIDFile (re-read on every login). Token
+// and TokenFile (exactly one) are a static client token for development
+// only, and never combine with the AppRole.
 type QM struct {
-	Addr      string
-	Token     string
-	TokenFile string
+	Addr         string
+	RoleID       string
+	SecretID     string
+	SecretIDFile string
+	Token        string
+	TokenFile    string
 }
 
 // WebAuthn is the relying party for passkeys. RPID is the registrable domain
@@ -177,7 +182,7 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("SMTP_USERNAME is set but SMTP_PASSWORD is not"))
 		}
 	}
-	qm, err := qmSettings(getenv)
+	qm, err := qmSettings(getenv, c.Production)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -216,13 +221,21 @@ func Load(getenv func(string) string) (Config, error) {
 	return c, errors.Join(errs...)
 }
 
-// qmSettings reads QM_ADDR, QM_TOKEN and QM_TOKEN_FILE. With none set,
-// secrets are disabled. Errors never include the token.
-func qmSettings(getenv func(string) string) (QM, error) {
-	q := QM{Addr: getenv("QM_ADDR"), Token: getenv("QM_TOKEN"), TokenFile: getenv("QM_TOKEN_FILE")}
+// qmSettings reads QM_ADDR, QM_ROLE_ID, QM_SECRET_ID, QM_SECRET_ID_FILE,
+// QM_TOKEN and QM_TOKEN_FILE. With none set, secrets are disabled. In
+// production only the AppRole is accepted: the static token is refused.
+// Errors never include a value.
+func qmSettings(getenv func(string) string, production bool) (QM, error) {
+	q := QM{
+		Addr: getenv("QM_ADDR"), RoleID: getenv("QM_ROLE_ID"),
+		SecretID: getenv("QM_SECRET_ID"), SecretIDFile: getenv("QM_SECRET_ID_FILE"),
+		Token: getenv("QM_TOKEN"), TokenFile: getenv("QM_TOKEN_FILE"),
+	}
+	hasToken := q.Token != "" || q.TokenFile != ""
+	hasRole := q.RoleID != "" || q.SecretID != "" || q.SecretIDFile != ""
 	if q.Addr == "" {
-		if q.Token != "" || q.TokenFile != "" {
-			return QM{}, errors.New("QM_TOKEN or QM_TOKEN_FILE is set but QM_ADDR is not")
+		if hasToken || hasRole {
+			return QM{}, errors.New("QM_ROLE_ID, QM_SECRET_ID, QM_SECRET_ID_FILE, QM_TOKEN or QM_TOKEN_FILE is set but QM_ADDR is not")
 		}
 		return q, nil
 	}
@@ -231,8 +244,24 @@ func qmSettings(getenv func(string) string) (QM, error) {
 		return QM{}, fmt.Errorf("QM_ADDR: %w", err)
 	}
 	q.Addr = addr
-	if (q.Token == "") == (q.TokenFile == "") {
-		return QM{}, errors.New("QM_ADDR is set: set exactly one of QM_TOKEN and QM_TOKEN_FILE")
+	switch {
+	case hasToken && production:
+		return QM{}, errors.New("QM_TOKEN and QM_TOKEN_FILE are refused when APP_ENV=production: use QM_ROLE_ID with QM_SECRET_ID or QM_SECRET_ID_FILE")
+	case hasToken && hasRole:
+		return QM{}, errors.New("QM_ADDR is set: use either QM_ROLE_ID with a secret id, or QM_TOKEN, not both")
+	case hasToken:
+		if (q.Token == "") == (q.TokenFile == "") {
+			return QM{}, errors.New("QM_ADDR is set: set exactly one of QM_TOKEN and QM_TOKEN_FILE")
+		}
+	case hasRole:
+		if q.RoleID == "" {
+			return QM{}, errors.New("QM_ROLE_ID is required with QM_SECRET_ID or QM_SECRET_ID_FILE")
+		}
+		if (q.SecretID == "") == (q.SecretIDFile == "") {
+			return QM{}, errors.New("QM_ROLE_ID is set: set exactly one of QM_SECRET_ID and QM_SECRET_ID_FILE")
+		}
+	default:
+		return QM{}, errors.New("QM_ADDR is set: set QM_ROLE_ID with QM_SECRET_ID or QM_SECRET_ID_FILE (in development, exactly one of QM_TOKEN and QM_TOKEN_FILE instead)")
 	}
 	return q, nil
 }

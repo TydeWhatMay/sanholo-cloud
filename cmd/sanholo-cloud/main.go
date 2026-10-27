@@ -54,7 +54,10 @@ func main() {
 
 	// The secrets client is built here so a bad qm address or token file
 	// stops the service at start.
-	sec, err := secrets.New(secrets.Config{Addr: cfg.QM.Addr, Token: cfg.QM.Token, TokenFile: cfg.QM.TokenFile})
+	sec, err := secrets.New(secrets.Config{
+		Addr: cfg.QM.Addr, RoleID: cfg.QM.RoleID, SecretID: cfg.QM.SecretID, SecretIDFile: cfg.QM.SecretIDFile,
+		Token: cfg.QM.Token, TokenFile: cfg.QM.TokenFile,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

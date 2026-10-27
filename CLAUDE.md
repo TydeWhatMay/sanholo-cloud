@@ -55,20 +55,20 @@ DATABASE_URL=postgres://... go run ./cmd/sanholo-cloud
 ## Secrets and security (non-negotiable)
 
 - Customer game tokens live only in the dedicated production qm under
-  `secret/data/sanholo/tenants/<id>/game`. The sign-up service writes, lists
-  and destroys; it never reads. Tokens are never stored in PostgreSQL, never
+  `secret/data/sanholo/tenants/<id>/game`. The sign-up service writes and
+  purges; it never reads or lists. Tokens are never stored in PostgreSQL, never
   logged, never shown back after entry.
 - Tenant ids follow qm's rule: 1 to 63 characters, lowercase letters, digits
   and hyphens, starting and ending with a letter or digit (they become part
   of the job id and the qm path).
-- qm health: check `GET /qm/v1/sys/ready` (503 when sealed or not ready).
-- Every deletion and token rotation goes through one code path
-  (`secrets.PurgeTenant` / `secrets.Rotate`) so qm's tenant purge can replace
-  its internals later.
+- qm health: check `GET /qm/v1/sys/health` (always 200; `initialized` and
+  `sealed` flags). The control plane authenticates with an AppRole.
+- Every deletion goes through one code path (`secrets.PurgeTenant`);
+  a rotation is a plain `secrets.Put`.
 - Each tenant job authenticates to qm with its Nomad workload identity
   (audience `qm.sanholo`); no secret is ever placed in a job. The qm
-  integration contract is pending from the qm project; build against a fake
-  qm until it lands.
+  integration contract is recorded in `prds/research/qm-contract.md`; tests
+  run against the fake qm in `internal/secrets/qmfake`.
 - Rate-limit keys behind the edge use the forwarded address only when it
   comes from the edge.
 - Use `gh-qm`, never `gh`. Never configure git credentials. The development

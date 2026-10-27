@@ -253,7 +253,7 @@ func TestSecondGameAccountRefusedAtConfirm(t *testing.T) {
 	}
 }
 
-func TestReconnectSameAccountRotates(t *testing.T) {
+func TestReconnectSameAccountWritesANewVersion(t *testing.T) {
 	f := newFixture(t)
 	f.tenant(t, "ann")
 	f.connectAs(t, "acct-ann", "ann", tokenA)
@@ -264,18 +264,28 @@ func TestReconnectSameAccountRotates(t *testing.T) {
 	if !prev.Reconnect {
 		t.Error("preview does not say this replaces the token")
 	}
-	if _, err := f.svc.Confirm(context.Background(), "acct-ann", "ann", secret); err != nil {
+	conn, err := f.svc.Confirm(context.Background(), "acct-ann", "ann", secret)
+	if err != nil {
 		t.Fatal(err)
 	}
 	stored, _ := f.qm.Stored(gamePath("ann"))
 	if stored["api_token"] != tokenA2 {
 		t.Fatalf("qm holds %v", stored)
 	}
-	if live := f.qm.Live("sanholo/tenants/ann/"); live != 1 {
-		t.Fatalf("%d live versions after rotate, want 1 (the old token destroyed)", live)
+	if v := f.qm.Versions(gamePath("ann")); v != 2 {
+		t.Fatalf("qm is at version %d, want 2 (a new write)", v)
+	}
+	// The row was updated, not duplicated.
+	got, err := f.svc.Get(context.Background(), "ann")
+	if err != nil || got == nil || !got.ConnectedAt.Truncate(time.Microsecond).Equal(conn.ConnectedAt.Truncate(time.Microsecond)) {
+		t.Fatalf("row = %+v, %v; want connected_at %v", got, err, conn.ConnectedAt)
 	}
 	if f.rows(t) != 1 {
 		t.Fatalf("%d rows", f.rows(t))
+	}
+	// Nothing was purged or deleted on the way.
+	if n := f.qm.Count("DELETE", "/"); n != 0 {
+		t.Fatalf("%d delete requests during a reconnect", n)
 	}
 }
 
@@ -412,11 +422,47 @@ func TestCommitFailureAfterQMWritePurges(t *testing.T) {
 	if _, err := f.svc.Confirm(ctx, "acct-ann", "ann", secret); !errors.Is(err, connect.ErrStore) {
 		t.Fatalf("err = %v", err)
 	}
-	if f.qm.Versions(gamePath("ann")) == 0 {
+	if f.qm.Count("POST", "/qm/v1/secret/data/") == 0 {
 		t.Fatal("the test never reached the qm write; the fixture is vacuous")
 	}
 	if live := f.qm.Live("sanholo/tenants/ann/"); live != 0 {
 		t.Fatalf("%d live secrets left in qm after a failed commit", live)
+	}
+	if f.rows(t) != 0 {
+		t.Fatal("a row was kept")
+	}
+}
+
+// Until qm Part E ships the purge is refused (403). The first-connect clean-up
+// is best effort: the customer sees the same result, and the log says what
+// happened without a secret.
+func TestPurgeRefusedDoesNotChangeTheResult(t *testing.T) {
+	f := newFixture(t)
+	f.tenant(t, "ann")
+	ctx := context.Background()
+	for _, q := range []string{
+		`CREATE FUNCTION commit_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'commit refused'; END $$`,
+		`CREATE CONSTRAINT TRIGGER boom AFTER INSERT ON game_accounts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION commit_boom()`,
+	} {
+		if _, err := f.pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.qm.SetDeleteAllowed(false)
+	_, secret, _ := f.svc.Begin(ctx, "acct-ann", "ann", tokenA)
+	if _, err := f.svc.Confirm(ctx, "acct-ann", "ann", secret); !errors.Is(err, connect.ErrStore) {
+		t.Fatalf("err = %v, want ErrStore as when the purge works", err)
+	}
+	if f.qm.Count("DELETE", "/qm/v1/secret/purge/sanholo/tenants/ann") != 1 {
+		t.Fatal("no purge was attempted; the test is vacuous")
+	}
+	if !strings.Contains(f.logs.String(), "could not purge") {
+		t.Fatalf("the failed purge was not logged:\n%s", f.logs.String())
+	}
+	for _, sec := range []string{tokenA, cpToken} {
+		if strings.Contains(f.logs.String(), sec) {
+			t.Fatalf("the log contains a secret")
+		}
 	}
 	if f.rows(t) != 0 {
 		t.Fatal("a row was kept")

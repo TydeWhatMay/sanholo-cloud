@@ -228,12 +228,9 @@ func (s *Service) store(ctx context.Context, e pendingEntry) (Connected, error) 
 	}
 
 	cr := secrets.Credentials{APIToken: e.token, ReplicantCode: e.acct.ReplicantCode}
-	if reconnect {
-		err = s.sec.Rotate(ctx, e.tenantID, cr)
-	} else {
-		err = s.sec.Put(ctx, e.tenantID, cr)
-	}
-	if err != nil {
+	// A reconnect is a plain new version of the same secret: qm keeps 16 and
+	// prunes the oldest, so there is no separate rotate step.
+	if err = s.sec.Put(ctx, e.tenantID, cr); err != nil {
 		s.log.Warn("connect: qm write failed", "tenant", e.tenantID, "error", err)
 		if !reconnect && mayHaveWritten(err) {
 			s.purge(ctx, e.tenantID)
@@ -260,7 +257,9 @@ func mayHaveWritten(err error) bool {
 
 // purge removes what this tenant has in qm. It is called only for a first
 // connect, when the tenant had no game account recorded, so nothing of value
-// is lost. Best effort: a failure is logged and the stray secret is the
+// is lost. Best effort: a failure is logged (the error carries no secret)
+// and does not change what the customer sees. Until qm's purge endpoint
+// ships (Part E) every purge fails with ErrDenied; the stray secret is the
 // tenant's own, unused, and removed by the next purge.
 func (s *Service) purge(ctx context.Context, tenantID string) {
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)

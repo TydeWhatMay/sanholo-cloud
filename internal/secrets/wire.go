@@ -6,82 +6,98 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
+	"time"
 )
 
 // THE QM WIRE CONTRACT (control plane side) -- every detail of how the
-// control plane talks to qm is in this file, so the day qm publishes its
-// integration contract the change is confined here (plus the fake in
-// qmfake, which mirrors this file and must change with it).
+// control plane talks to qm is in this file, so a change in qm's contract is
+// confined here (plus the fake in qmfake, which mirrors this file and must
+// change with it).
 //
-// PROVISIONAL: qm's contract is not published yet. The client side
-// (san-holo internal/qmcreds/wire.go) only READS, with these shapes:
+// Per qm contract, prds/research/qm-contract.md:
 //
-//	read: GET <addr>/qm/v1/secret/data/<path>   header X-Qm-Token
-//	      -> {"data":{"data":{"api_token":...,"replicant_code":...}}}
-//
-// The write shapes below are the KV v2 (Vault-compatible) counterparts, an
-// assumption on top of that, not something the client confirms:
-//
-//	put:      POST <addr>/qm/v1/secret/data/<path>
-//	          {"data":{"api_token":...,"replicant_code":...}}
-//	          -> {"data":{"version":N}}
-//	list:     GET  <addr>/qm/v1/secret/metadata/<prefix>/?list=true
-//	          -> {"data":{"keys":["game","sub/"]}}   (404 when empty)
+//	login:    POST <addr>/qm/v1/auth/approle/login   {"role_id":..,"secret_id":..}
+//	          -> {"auth":{"client_token":..,"lease_duration":<seconds>}}
+//	renew:    POST <addr>/qm/v1/auth/token/renew-self        (X-QM-Token)
+//	          -> {"auth":{"lease_duration":<seconds>}}
+//	write:    POST <addr>/qm/v1/secret/data/<path>   {"data":{...}}   (X-QM-Token)
+//	          -> {"version":N,"created_time":".."}      (flat, no data envelope)
 //	metadata: GET  <addr>/qm/v1/secret/metadata/<path>
-//	          -> {"data":{"versions":{"1":{"destroyed":false},...}}}
-//	destroy:  POST <addr>/qm/v1/secret/destroy/<path>   {"versions":[1,2]}
-//	ready:    GET  <addr>/qm/v1/sys/ready   (no auth; 503 when sealed)
+//	          -> {"current_version":N,"oldest_version":N,"created_time":..,
+//	              "updated_time":..,"versions":{"<n>":{..,"destroyed":bool}}}
+//	          404 when the path is not present. Never carries a value.
+//	health:   GET  <addr>/qm/v1/sys/health   (no auth; always 200)
+//	          -> {"initialized":bool,"sealed":bool}
 //
-// Auth is the header X-Qm-Token carrying the control plane's own client
-// token. Policy (US-002): create/update on data, list and read of
-// metadata, delete plus sudo on destroy, and NO read of data: a GET of a
-// data path is 403. This package never issues one.
+// Errors: every authentication failure and policy denial is 403 `forbidden`
+// (qm never answers 401); a sealed qm answers 503 `vault_sealed` on any
+// barrier-backed request. A rotation is a plain new write: qm keeps 16
+// versions and prunes the oldest.
+//
+// PROVISIONAL (qm Part E, not shipped; shapes may change). Both need delete
+// plus sudo on the matching path, which the interim grants do not include:
+//
+//	delete one path:  DELETE <addr>/qm/v1/secret/metadata/<path>
+//	                  (every version and the metadata; the fake implements it,
+//	                  this package does not call it)
+//	purge a prefix:   DELETE <addr>/qm/v1/secret/purge/<prefix>
+//	                  (a whole tenant prefix in one audited operation)
+//	                  -> 200 or 204
+//
+// The error body shape is not in the contract. errorCode accepts the
+// likely ones ({"code":..}, {"error":{"code":..}}, {"error":".."}).
 //
 // <path> is sanholo/tenants/<tenant>/game; the "secret/" mount is part of
-// the URL prefixes below.
+// the URL prefixes below. The policy has no read of data: a GET of a data
+// path is 403. This package never issues one.
 const (
-	readyPath      = "/qm/v1/sys/ready"
+	healthPath     = "/qm/v1/sys/health"
+	loginPath      = "/qm/v1/auth/approle/login"
+	renewPath      = "/qm/v1/auth/token/renew-self"
 	dataPrefix     = "/qm/v1/secret/data/"
 	metaPrefix     = "/qm/v1/secret/metadata/"
-	destroyPrefix  = "/qm/v1/secret/destroy/"
-	authHeaderName = "X-Qm-Token"
+	purgePrefix    = "/qm/v1/secret/purge/" // provisional (Part E)
+	authHeaderName = "X-QM-Token"
 
 	tenantsRoot = "sanholo/tenants/"
 	gameLeaf    = "game"
 
+	codeSealed = "vault_sealed"
+
+	// defaultLease is assumed when qm reports no usable lease duration.
+	defaultLease = 15 * time.Minute
+
 	// Bounds on what a (possibly misbehaving) qm may make us do.
-	maxBody  = 1 << 20
-	maxDepth = 4
-	maxKeys  = 200
+	maxBody     = 1 << 20
+	maxVersions = 1000
 )
 
 // call is one request, described without any transport detail.
 type call struct {
 	method string
 	path   string
-	query  url.Values
 	body   []byte
-	// okNotFound makes a 404 a normal answer (an empty listing).
+	// okNotFound makes a 404 a normal answer (not present, nothing to purge).
 	okNotFound bool
-	// noAuth omits the token header (the ready probe).
+	// noAuth omits the token header (health, login).
 	noAuth bool
 }
 
-// segmentRE is what a path segment returned by qm must look like before we
-// build another request from it.
-var segmentRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+func tenantPrefix(tenantID string) string { return tenantsRoot + tenantID }
 
-// tenantPrefix is the directory holding a tenant's secrets, with the
-// trailing slash that keeps tenant "a" from matching tenant "a-b".
-func tenantPrefix(tenantID string) string { return tenantsRoot + tenantID + "/" }
+func gamePath(tenantID string) string { return tenantPrefix(tenantID) + "/" + gameLeaf }
 
-func gamePath(tenantID string) string { return tenantPrefix(tenantID) + gameLeaf }
+func healthCall() call { return call{method: http.MethodGet, path: healthPath, noAuth: true} }
 
-func readyCall() call { return call{method: http.MethodGet, path: readyPath, noAuth: true} }
+func loginCall(roleID, secretID string) (call, error) {
+	body, err := json.Marshal(map[string]string{"role_id": roleID, "secret_id": secretID})
+	if err != nil {
+		return call{}, errors.New("encode login")
+	}
+	return call{method: http.MethodPost, path: loginPath, body: body, noAuth: true}, nil
+}
+
+func renewCall() call { return call{method: http.MethodPost, path: renewPath, body: []byte("{}")} }
 
 func putCall(path string, c Credentials) (call, error) {
 	body, err := json.Marshal(map[string]any{"data": map[string]string{
@@ -93,97 +109,116 @@ func putCall(path string, c Credentials) (call, error) {
 	return call{method: http.MethodPost, path: dataPrefix + path, body: body}, nil
 }
 
-func listCall(prefix string) call {
-	return call{
-		method: http.MethodGet, path: metaPrefix + prefix,
-		query: url.Values{"list": {"true"}}, okNotFound: true,
-	}
-}
-
 func metaCall(path string) call {
 	return call{method: http.MethodGet, path: metaPrefix + path, okNotFound: true}
 }
 
-func destroyCall(path string, versions []int) call {
-	body, _ := json.Marshal(map[string][]int{"versions": versions})
-	return call{method: http.MethodPost, path: destroyPrefix + path, body: body}
+func purgeCall(prefix string) call {
+	return call{method: http.MethodDelete, path: purgePrefix + prefix, okNotFound: true}
 }
 
-// decodePutVersion returns the version number the put created.
+// decodeHealth returns qm's initialized and sealed flags.
+func decodeHealth(body []byte) (initialized, sealed bool, err error) {
+	var r struct {
+		Initialized *bool `json:"initialized"`
+		Sealed      *bool `json:"sealed"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil || r.Initialized == nil || r.Sealed == nil {
+		return false, false, errors.New("malformed health response")
+	}
+	return *r.Initialized, *r.Sealed, nil
+}
+
+// decodeAuth returns the client token (empty when the reply carries none,
+// as renew-self may) and the lease. A missing or non-positive lease is
+// defaultLease.
+func decodeAuth(body []byte) (token string, lease time.Duration, err error) {
+	var r struct {
+		Auth struct {
+			ClientToken   string  `json:"client_token"`
+			LeaseDuration float64 `json:"lease_duration"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", 0, errors.New("malformed auth response")
+	}
+	lease = defaultLease
+	if s := r.Auth.LeaseDuration; s > 0 && s < 1e9 {
+		lease = time.Duration(s * float64(time.Second))
+	}
+	return r.Auth.ClientToken, lease, nil
+}
+
+// decodePutVersion returns the version number the write created.
 func decodePutVersion(body []byte) (int, error) {
 	var r struct {
-		Data struct {
-			Version int `json:"version"`
-		} `json:"data"`
+		Version int `json:"version"`
 	}
-	if err := json.Unmarshal(body, &r); err != nil || r.Data.Version < 1 {
-		return 0, errors.New("malformed put response")
+	if err := json.Unmarshal(body, &r); err != nil || r.Version < 1 {
+		return 0, errors.New("malformed write response")
 	}
-	return r.Data.Version, nil
+	return r.Version, nil
 }
 
-// decodeKeys returns the entries of a listing. Each must be one safe path
-// segment, optionally with a trailing slash (a directory); anything else is
-// refused rather than turned into a request path.
-func decodeKeys(body []byte) ([]string, error) {
+// decodeCurrentVersion returns the current version number, or 0 when that
+// version is destroyed (no value to find).
+func decodeCurrentVersion(body []byte) (int, error) {
 	var r struct {
-		Data struct {
-			Keys []string `json:"keys"`
-		} `json:"data"`
+		Current  int `json:"current_version"`
+		Versions map[string]struct {
+			Destroyed bool `json:"destroyed"`
+		} `json:"versions"`
 	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, errors.New("malformed list response")
+	if err := json.Unmarshal(body, &r); err != nil || r.Current < 1 {
+		return 0, errors.New("malformed metadata response")
 	}
-	if len(r.Data.Keys) > maxKeys {
-		return nil, errors.New("list response has too many keys")
+	if len(r.Versions) > maxVersions {
+		return 0, errors.New("metadata response has too many versions")
 	}
-	for _, k := range r.Data.Keys {
-		if !segmentRE.MatchString(strings.TrimSuffix(k, "/")) {
-			return nil, errors.New("list response has an unsafe key")
-		}
+	if v, ok := r.Versions[fmt.Sprint(r.Current)]; ok && v.Destroyed {
+		return 0, nil
 	}
-	return r.Data.Keys, nil
+	return r.Current, nil
 }
 
-// decodeLiveVersions returns the version numbers that still hold data
-// (not destroyed), ascending.
-func decodeLiveVersions(body []byte) ([]int, error) {
+// errorCode extracts qm's error code from a non-success body, or "". The
+// body is matched against known codes only and never kept or echoed.
+func errorCode(body []byte) string {
 	var r struct {
-		Data struct {
-			Versions map[string]struct {
-				Destroyed bool `json:"destroyed"`
-			} `json:"versions"`
-		} `json:"data"`
+		Code  string          `json:"code"`
+		Error json.RawMessage `json:"error"`
 	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, errors.New("malformed metadata response")
+	if json.Unmarshal(body, &r) != nil {
+		return ""
 	}
-	if len(r.Data.Versions) > maxKeys {
-		return nil, errors.New("metadata response has too many versions")
+	if r.Code != "" {
+		return r.Code
 	}
-	var live []int
-	for k, v := range r.Data.Versions {
-		n, err := strconv.Atoi(k)
-		if err != nil || n < 1 {
-			return nil, errors.New("metadata response has a bad version number")
-		}
-		if !v.Destroyed {
-			live = append(live, n)
-		}
+	var obj struct {
+		Code string `json:"code"`
 	}
-	sort.Ints(live)
-	return live, nil
+	if json.Unmarshal(r.Error, &obj) == nil && obj.Code != "" {
+		return obj.Code
+	}
+	var s string
+	if json.Unmarshal(r.Error, &s) == nil {
+		return s
+	}
+	return ""
 }
 
-// statusError maps a non-success HTTP status to a typed error. It never
-// looks at the response body.
-func statusError(status int) error {
+// statusError maps a non-success HTTP status (and, for 503, the error code)
+// to a typed error. It never keeps the response body.
+func statusError(status int, body []byte) error {
 	switch {
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	case status == http.StatusForbidden:
 		return ErrDenied
+	case status == http.StatusServiceUnavailable && errorCode(body) == codeSealed:
+		return ErrSealed
 	case status == http.StatusTooManyRequests || status >= 500:
 		return ErrUnavailable
 	default:
+		// Includes 401, which qm never sends.
 		return ErrProtocol
 	}
 }

@@ -182,6 +182,11 @@ func TestCSRFRequiredOnPosts(t *testing.T) {
 	c := e.client(t)
 	c.get("/", nil)
 	tok := c.cookies[csrfCookie].Value
+	// A token differing in its first character, whatever that character is.
+	wrong := "x" + tok[1:]
+	if tok[0] == 'x' {
+		wrong = "y" + tok[1:]
+	}
 	cases := []struct {
 		name string
 		form url.Values
@@ -189,7 +194,7 @@ func TestCSRFRequiredOnPosts(t *testing.T) {
 		want int
 	}{
 		{"no token", url.Values{"email": {"a@example.org"}}, nil, 403},
-		{"wrong field token", url.Values{"email": {"a@example.org"}, "csrf": {"x" + tok[1:]}}, nil, 403},
+		{"wrong field token", url.Values{"email": {"a@example.org"}, "csrf": {wrong}}, nil, 403},
 		{"empty field token", url.Values{"email": {"a@example.org"}, "csrf": {""}}, nil, 403},
 		{"field token", url.Values{"email": {"a@example.org"}, "csrf": {tok}}, nil, 200},
 		{"header token", url.Values{"email": {"b@example.org"}}, map[string]string{"X-CSRF-Token": tok}, 200},

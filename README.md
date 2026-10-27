@@ -31,7 +31,8 @@ for them.
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | When the username is set, STARTTLS and AUTH are mandatory; the service refuses to send without them. The password comes from qm and is never logged. |
 | `SMTP_FROM` | Sender. Default `no-reply@<SMTP_HOST>`. |
 | `QM_ADDR` | Origin of the dedicated qm that holds customer game tokens: `https`, or `http` on a loopback host. Unset in development: secrets are disabled (the service starts; operations return `ErrSecretsUnavailable`). Required when `APP_ENV=production`. |
-| `QM_TOKEN`, `QM_TOKEN_FILE` | The control plane's own qm client token, directly or as a file path (re-read on every request, so renewal needs no restart). Exactly one when `QM_ADDR` is set. The principal is write-only; the token is never logged. |
+| `QM_ROLE_ID`, `QM_SECRET_ID`, `QM_SECRET_ID_FILE` | The control plane's qm AppRole (`sanholo-provisioner`): the role id and exactly one of the secret id or a file holding it (re-read on every login). The service logs in with `POST /qm/v1/auth/approle/login`, sends the client token as `X-QM-Token`, renews it with `renew-self` past two thirds of its lease and logs in again when qm rejects it (once per request). Required with `QM_ADDR` when `APP_ENV=production`. The principal is write-only; none of these values is logged. |
+| `QM_TOKEN`, `QM_TOKEN_FILE` | A static qm client token, exactly one of the two, for development and tests only. Refused when `APP_ENV=production`, and never combined with the AppRole variables. |
 | `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
 | `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
 | `WEBAUTHN_RP_NAME` | Name shown by the authenticator. Default `SanHolo`. |
@@ -106,12 +107,21 @@ column named for a token, secret or password is not a `*_hash`.
 ### Tenant secrets
 
 `internal/secrets` is the only route to tenant secrets in qm. It can store
-a tenant's game credentials (`Put`), list names (`List`) and destroy
-(`PurgeTenant`, `Rotate`); it has no method that returns a value, and
-`TestAPISurface` fails if one is added. Deletion goes only through
-`PurgeTenant` and `Rotate`. Every wire detail is in `secrets/wire.go`
-(provisional until qm's integration contract lands); `secrets/qmfake` is the
-in-memory qm the tests use.
+a tenant's game credentials (`Put`), report the current version number of
+that secret from qm's metadata (`Version`, 0 when absent) and purge a tenant
+(`PurgeTenant`); it has no method that returns a value and none that lists
+or enumerates tenants (SanHolo's database is the record), and `TestAPISurface`
+fails if one is added. A token rotation is a plain new `Put`: qm keeps 16
+versions and prunes the oldest. Deletion goes only through `PurgeTenant`,
+which uses qm's Part E purge endpoint. That endpoint has not shipped, so
+until it does a purge is refused with `ErrDenied` (the first-connect
+clean-up is best effort and logs the refusal). Qm errors map to `ErrDenied`
+(403, after one fresh login), `ErrSealed` (503 `vault_sealed`, also an
+`ErrUnavailable`), `ErrUnavailable` (other 5xx, 429, network, timeout) and
+`ErrProtocol`. `Ready` reads `GET /qm/v1/sys/health` and passes only when qm
+is initialized and unsealed. The wire is in `secrets/wire.go`, per the
+contract in `prds/research/qm-contract.md` (the Part E endpoints are marked
+provisional there); `secrets/qmfake` is the in-memory qm the tests use.
 
 ### Game account
 
@@ -136,7 +146,7 @@ qm with `secrets.Put`, then commits. A game account already connected to
 another tenant loses the race at the unique constraint before anything
 reaches qm; a failed qm write rolls the row back. A different game account
 for a tenant that has one is refused (beta limit: one). Connecting the same
-game account again with a new token uses `secrets.Rotate`. Without `QM_ADDR`
+game account again with a new token is a new `secrets.Put` (a new version). Without `QM_ADDR`
 the section says connecting is not available. "Create a new account" is not
 built: it waits on the developer's answer about registrations per IP.
 

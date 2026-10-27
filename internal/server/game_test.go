@@ -265,8 +265,12 @@ func TestGameBetaLimitAndReconnect(t *testing.T) {
 		t.Fatalf("reconnect confirm: %d %s", r.status, r.body)
 	}
 	stored, _ := g.qm.Stored(qmPath(tenant))
-	if stored["api_token"] != tokenA2 || g.qm.Live("sanholo/tenants/"+tenant+"/") != 1 {
-		t.Fatalf("qm holds %v (live %d)", stored, g.qm.Live("sanholo/tenants/"+tenant+"/"))
+	// A reconnect is a new version of the same secret, not a deletion.
+	if stored["api_token"] != tokenA2 || g.qm.Versions(qmPath(tenant)) != 2 {
+		t.Fatalf("qm holds %v (versions %d)", stored, g.qm.Versions(qmPath(tenant)))
+	}
+	if n := g.qm.Count("DELETE", "/"); n != 0 {
+		t.Fatalf("%d delete requests during a reconnect", n)
 	}
 }
 
