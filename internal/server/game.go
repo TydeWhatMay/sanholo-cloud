@@ -143,6 +143,8 @@ func (a *App) gameError(c *fiber.Ctx, err error) error {
 			"Lines":   []string{"The token was not kept. Enter it again to continue."},
 			"Link":    "/account", "LinkText": "Back to your account",
 		})
+	case errors.Is(err, connect.ErrDeleting):
+		return a.message(c, fiber.StatusConflict, "Account being deleted", "This account is being deleted. Nothing was saved.")
 	case errors.Is(err, connect.ErrStore):
 		return a.message(c, fiber.StatusServiceUnavailable, "Not saved",
 			"SanHolo could not store the token. Nothing was saved. Enter the token again in a few minutes.")

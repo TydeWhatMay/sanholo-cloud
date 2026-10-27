@@ -60,6 +60,11 @@ type Config struct {
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
+	// DeletionLogPath is DELETION_LOG_PATH: the append-only file that
+	// account deletions are recorded in, outside the database, so that a
+	// restore can re-apply them (deploy/README.md, "After a restore").
+	// Required in production; empty elsewhere records nothing.
+	DeletionLogPath string
 	// Production is APP_ENV=production: mail, an https base URL and trusted
 	// proxies must be configured (the default base URL is http, so an unset
 	// APP_BASE_URL is refused too).
@@ -270,6 +275,10 @@ func Load(getenv func(string) string) (Config, error) {
 		// One source of truth: the key the control plane signs with is the
 		// key the tenant jobs hand to the Bridge.
 		c.Nomad.Job.VAPIDPublicKey = push.VAPIDPublic
+	}
+	c.DeletionLogPath = getenv("DELETION_LOG_PATH")
+	if c.Production && c.DeletionLogPath == "" {
+		errs = append(errs, errors.New("DELETION_LOG_PATH is required when APP_ENV=production: without it a restore from backup brings deleted accounts back"))
 	}
 	c.TenantDomain = getenv("TENANT_DOMAIN")
 	if c.Nomad.Enabled() {

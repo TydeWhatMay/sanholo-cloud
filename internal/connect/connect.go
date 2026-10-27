@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lhaig/sanholo-cloud/internal/deletionlog"
 	"github.com/lhaig/sanholo-cloud/internal/game"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
@@ -45,6 +46,9 @@ var (
 	ErrStore = errors.New("the credentials could not be stored")
 	// ErrBusy: too many connections are waiting for confirmation.
 	ErrBusy = errors.New("too many pending connections")
+	// ErrDeleting: the tenant's account is being deleted; nothing can be
+	// connected to it any more.
+	ErrDeleting = errors.New("the account is being deleted")
 )
 
 // Service connects game accounts. It is safe for concurrent use.
@@ -53,6 +57,8 @@ type Service struct {
 	sec  *secrets.Client
 	game *game.Client
 	prov *provision.Service
+	// dlog records account deletions outside the database (nil: none).
+	dlog *deletionlog.Log
 	// lockWait is how long a disconnect waits for the tenant's lock.
 	lockWait time.Duration
 	log      *slog.Logger
@@ -200,9 +206,16 @@ func (s *Service) store(ctx context.Context, e pendingEntry) (Connected, error) 
 
 	// Serialise connects for one tenant; the unique constraints serialise
 	// them across tenants.
-	var one int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`, e.tenantID).Scan(&one); err != nil {
+	// An account deletion marks the tenant 'deleting' under this same row
+	// lock, so a connect that was waiting for confirmation either commits
+	// before the mark (and the deletion removes what it wrote) or finds the
+	// mark here and writes nothing, to qm or to the database.
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1 FOR UPDATE`, e.tenantID).Scan(&status); err != nil {
 		return Connected{}, fmt.Errorf("connect: tenant: %w", err)
+	}
+	if status == "deleting" {
+		return Connected{}, ErrDeleting
 	}
 	var existing string
 	reconnect := false

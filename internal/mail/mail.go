@@ -27,15 +27,22 @@ type Mailer interface {
 // Enqueue stores m for delivery. A message not sent by expires (zero for
 // never) is dropped: a sign-in link that is already dead is not worth mailing.
 func Enqueue(ctx context.Context, tx pgx.Tx, m Message, expires time.Time) error {
+	_, err := EnqueueID(ctx, tx, m, expires)
+	return err
+}
+
+// EnqueueID is Enqueue that returns the outbox row's id.
+func EnqueueID(ctx context.Context, tx pgx.Tx, m Message, expires time.Time) (int64, error) {
 	var exp *time.Time
 	if !expires.IsZero() {
 		exp = &expires
 	}
-	_, err := tx.Exec(ctx,
-		`INSERT INTO mail_outbox (to_email, subject, body, expires_at) VALUES ($1, $2, $3, $4)`,
-		m.To, m.Subject, m.Body, exp)
+	var id int64
+	err := tx.QueryRow(ctx,
+		`INSERT INTO mail_outbox (to_email, subject, body, expires_at) VALUES ($1, $2, $3, $4) RETURNING id`,
+		m.To, m.Subject, m.Body, exp).Scan(&id)
 	if err != nil {
-		return fmt.Errorf("mail: enqueue: %w", err)
+		return 0, fmt.Errorf("mail: enqueue: %w", err)
 	}
-	return nil
+	return id, nil
 }

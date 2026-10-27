@@ -156,6 +156,7 @@ is in the client release notes) and make the job run `image@digest`.
 | `ROLLOUT_CANARY_SOAK`, `ROLLOUT_BATCH_SOAK` | Soak after a tenant's deployment turned healthy: 1h for the canary, 10m for other batches (`0` = none). Live check results, restarts and the allocation are watched; see the README. |
 | `TENANT_VOLUME_SIZE_MB`, `TENANT_VOLUME_NODE_POOL`, `TENANT_VOLUME_CONSTRAINT` | The tenant volume, section 2. |
 | `QM_ADDR` | Also given to each bot as `-qm-addr`. |
+| `DELETION_LOG_PATH` | Required in production. The append-only file account deletions are recorded in (section 8). Put it on a volume that is not restored with the database and is copied off the host. |
 
 No variable that holds a secret is ever copied into a job.
 
@@ -208,3 +209,42 @@ left to the updater). To rotate without a moment of rejected requests:
   subscription (a browser's subscription is bound to the public key it was made
   with); do not rotate it casually. The tenant jobs get the public key from the
   same setting, so a change re-registers every job through the reconcile worker.
+
+## 8. After a restore: deleted accounts must stay deleted
+
+A restore from backup (US-022) brings back every account that was deleted after
+the backup was taken, with its email, sessions and rows. The privacy notice
+promises that a deleted account is not restored, so a restore is not finished
+until those deletions have been applied again.
+
+The control plane keeps a **deletion log**, `DELETION_LOG_PATH`: one JSON line
+per account deletion, `{"at":..., "tenant":"<id>", "account":"<uuid>"}`, written
+and fsynced before the bot is stopped or any row is deleted. It holds two
+random identifiers and a time, no email address. It lives outside PostgreSQL and
+is not part of the database backup: put it on a volume that the restore does not
+touch and copy it off the host with the other backups (it is tiny and
+append-only). The audit log was not chosen because it is a table: a restore
+rolls it back together with the deletions it records.
+
+Procedure, with the control plane stopped and the restored database in place:
+
+1. Restore the database, then (if the log lived on the restored volume) put the
+   latest copy of the deletion log back at `DELETION_LOG_PATH`. Never restore an
+   older log over a newer one.
+2. Run `sanholo-cloud deletions reapply` with the production environment (the
+   same variables as the server; it reads `DELETION_LOG_PATH`, or take the file
+   as an argument). It deletes again, through the same code as the web
+   deletion, every tenant in the log whose account the restored database still
+   holds: stops and purges the job, deletes the volume, purges qm, deletes the
+   rows and writes an audit row with actor `cli`. It sends no email. A tenant the
+   database does not have is reported as "nothing to delete". Run it again until
+   it reports no failure; it is safe to repeat.
+3. Start the control plane. Its cleanup worker retries what could not finish
+   (qm until Part E ships, a busy volume) and its check job reports the result
+   in `/admin`, under "Account deletions".
+4. Open `/admin` and confirm that no deletion is listed as failed.
+
+Restored volumes of deleted tenants must also be removed (Nomad volumes are
+restored with the host backup): `deletions reapply` does this for every tenant it
+re-deletes, through `DeleteVolume`.
+

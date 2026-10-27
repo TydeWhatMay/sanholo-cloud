@@ -137,6 +137,10 @@ func TestLoadNomadRequiredInProduction(t *testing.T) {
 	}
 	pub, priv := vapidPair(t)
 	prod["VAPID_PUBLIC_KEY"], prod["VAPID_PRIVATE_KEY"], prod["VAPID_SUBJECT"] = pub, priv, "mailto:ops@tydewhatmay.eu"
+	if _, err := Load(env(prod)); err == nil || !strings.Contains(err.Error(), "DELETION_LOG_PATH") {
+		t.Fatalf("production without a deletion log: %v", err)
+	}
+	prod["DELETION_LOG_PATH"] = "/var/lib/sanholo-log/deletions.jsonl"
 	if _, err := Load(env(prod)); err != nil {
 		t.Fatalf("production with Nomad: %v", err)
 	}

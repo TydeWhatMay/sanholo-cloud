@@ -63,3 +63,38 @@ func TenantTables(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	}
 	return out, nil
 }
+
+// AccountTables lists the base tables in the current schema that have an
+// account_id column (type uuid): the rows that belong to one account and not
+// to a tenant. Account deletion deletes from each and the check job counts in
+// each, so a table added later is covered by its column name, like
+// TenantTables. Tables whose rows reach an account through another table
+// (bridge sessions through account_sessions) have no such column and go with
+// the cascade of the row they hang off.
+func AccountTables(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT c.table_name
+		FROM information_schema.columns c
+		JOIN information_schema.tables t
+		  ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+		WHERE c.table_schema = current_schema()
+		  AND c.column_name = 'account_id' AND c.data_type = 'uuid'
+		  AND t.table_type = 'BASE TABLE'
+		ORDER BY c.table_name`)
+	if err != nil {
+		return nil, fmt.Errorf("db: list account tables: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("db: scan account table: %w", err)
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: list account tables: %w", err)
+	}
+	return out, nil
+}

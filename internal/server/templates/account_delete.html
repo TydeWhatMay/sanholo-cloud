@@ -1,0 +1,14 @@
+<h1>Delete your account</h1>
+{{if .Error}}<p role="alert"><strong>{{.Error}}</strong></p>{{end}}
+<p>Deleting your account stops your bot, deletes your game token from the secrets store, deletes your bot's data volume and deletes every record SanHolo holds for your account: your email address, sessions, passkeys, notification subscriptions, game account record, invites and export links.</p>
+<p>The deletion is permanent. SanHolo cannot restore the account afterwards. Export your data first if you want a copy.</p>
+<p>Your Replicant Space account is not deleted. Delete it in the game if you want it gone.</p>
+<p>Encrypted backups made before the deletion keep your data until they expire, at most 30 days. A deleted account is not restored from a backup.</p>
+<p>If the secrets store or the disk volume cannot complete a deletion at once, SanHolo records it and retries until it succeeds. The confirmation says when that happens.</p>
+<form method="post" action="/account/delete" autocomplete="off">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="delete-email">Type the email address of this account to confirm</label>
+<p><input id="delete-email" type="email" name="email" required maxlength="254" autocomplete="off" spellcheck="false"></p>
+<button type="submit">Delete my account</button>
+</form>
+<p><a href="/account">Cancel</a></p>

@@ -98,6 +98,15 @@ func (p *pendingStore) drop(secret, accountID string) {
 	}
 }
 
+// dropAccount removes the account's entry, if any (account deletion).
+func (p *pendingStore) dropAccount(accountID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if h, ok := p.byAccount[accountID]; ok {
+		p.removeLocked(h)
+	}
+}
+
 func (p *pendingStore) removeLocked(h string) {
 	if e, ok := p.byHash[h]; ok {
 		delete(p.byAccount, e.accountID)

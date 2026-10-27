@@ -16,6 +16,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/connect"
+	"github.com/lhaig/sanholo-cloud/internal/export"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/proxy"
 	"github.com/lhaig/sanholo-cloud/internal/push"
@@ -45,6 +46,9 @@ type App struct {
 	// Connect serves the game-account section of /account; nil (or a service
 	// without qm) shows that connecting is not available.
 	Connect *connect.Service
+	// Export issues data export links and builds the archives (US-017); nil
+	// leaves the export out of the account page.
+	Export *export.Service
 	// Provision starts the tenant's bot after a game account is connected and
 	// reports its state on /account; nil (or a disabled service) leaves
 	// tenants "not provisioned".
@@ -126,6 +130,11 @@ func (a *App) mount(app *fiber.App) {
 	acct.Get("/game/disconnect", a.gameDisconnectConfirm)
 	acct.Post("/game/disconnect", a.gameDisconnect)
 	acct.Post("/instance/retry", a.instanceRetry)
+	acct.Post("/export", a.exportCreate)
+	acct.Get("/export/download", a.exportConfirm)
+	acct.Post("/export/download", a.exportDownload)
+	acct.Get("/delete", a.deleteConfirm)
+	acct.Post("/delete", a.deleteAccount)
 	acct.Post("/bridge/open", a.bridgeOpen)
 	app.Post("/signout", a.requireSession, a.signout)
 	a.mountAdmin(app)
@@ -371,6 +380,7 @@ func (a *App) account(c *fiber.Ctx) error {
 	data := fiber.Map{
 		"Email": ses.Email, "Sessions": rows, "Passkeys": a.Auth.PasskeysEnabled(), "Keys": keys, "IsOperator": ses.IsOperator,
 		"GameAvailable": a.Connect.Available(), "BridgeAvailable": a.bridges != nil,
+		"ExportAvailable": a.Export != nil, "DeleteAvailable": a.Connect != nil,
 	}
 	if a.Connect != nil {
 		g, err := a.Connect.Get(c.UserContext(), ses.TenantID)

@@ -169,6 +169,47 @@ func (s *Service) Tenants(ctx context.Context) ([]Tenant, error) {
 	return out, rows.Err()
 }
 
+// Deletion is one account deletion (US-018): the tombstone while it is
+// incomplete, and its last verification. It holds no personal data.
+type Deletion struct {
+	TenantID    string
+	RequestedAt time.Time
+	CompletedAt *time.Time
+	CheckedAt   *time.Time
+	// CheckState is unchecked, pending, passed or failed; CheckDetail lists
+	// what the verification found, in fixed phrases and table names.
+	CheckState  string
+	CheckDetail string
+	// Pending are the deletions still to finish (secret, volume).
+	Pending string
+	// Status is the tombstone's tenant status, empty once it is removed.
+	Status string
+}
+
+// Deletions lists account deletions, the incomplete ones first, then the
+// most recent completed ones.
+func (s *Service) Deletions(ctx context.Context) ([]Deletion, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT d.tenant_key, d.requested_at, d.completed_at, d.checked_at, d.check_state, d.check_detail,
+		       coalesce((SELECT string_agg(p.kind, ', ' ORDER BY p.kind) FROM pending_cleanups p WHERE p.tenant_key = d.tenant_key), ''),
+		       coalesce(t.status, '')
+		FROM tenant_deletions d LEFT JOIN tenants t ON t.id = d.tenant_key
+		ORDER BY (d.completed_at IS NOT NULL), d.requested_at DESC, d.tenant_key LIMIT 100`)
+	if err != nil {
+		return nil, fmt.Errorf("admin: deletions: %w", err)
+	}
+	defer rows.Close()
+	var out []Deletion
+	for rows.Next() {
+		var d Deletion
+		if err := rows.Scan(&d.TenantID, &d.RequestedAt, &d.CompletedAt, &d.CheckedAt, &d.CheckState, &d.CheckDetail, &d.Pending, &d.Status); err != nil {
+			return nil, fmt.Errorf("admin: deletions: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // WaitlistEntry is one waiting-list address and the state of its latest
 // invite: none, outstanding, used, expired or revoked.
 type WaitlistEntry struct {

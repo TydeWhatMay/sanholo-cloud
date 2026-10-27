@@ -189,6 +189,7 @@ func (s *Service) Cleanup(ctx context.Context) error {
 		`DELETE FROM webauthn_challenges WHERE expires_at < $1`,
 		`DELETE FROM rate_counters WHERE window_start < $1::timestamptz - interval '2 days'`,
 		`DELETE FROM mail_outbox WHERE (sent_at IS NOT NULL OR failed_at IS NOT NULL) AND created_at < $1::timestamptz - interval '7 days'`,
+		`DELETE FROM export_links WHERE expires_at < $1::timestamptz - interval '1 day'`,
 		`DELETE FROM invites WHERE expires_at < $1::timestamptz - interval '14 days'`,
 	} {
 		if _, err := s.pool.Exec(ctx, q, now); err != nil {

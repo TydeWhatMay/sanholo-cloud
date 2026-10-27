@@ -12,15 +12,29 @@
 {{if .Instance}}<td>{{.Instance}}</td>
 <td>{{.Health}}</td>{{else}}<td class="muted">not provisioned</td>
 <td class="muted">none</td>{{end}}
-<td><form method="post" action="/admin/tenants/{{.ID}}/{{if eq .Status "suspended"}}unsuspend{{else}}suspend{{end}}">
+<td>{{if eq .Status "deleting"}}<span class="muted">being deleted</span>{{else}}<form method="post" action="/admin/tenants/{{.ID}}/{{if eq .Status "suspended"}}unsuspend{{else}}suspend{{end}}">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button class="plain" type="submit">{{if eq .Status "suspended"}}Unsuspend{{else}}Suspend{{end}}</button>
 </form>{{if .CanRestart}}
 <form method="post" action="/admin/tenants/{{.ID}}/restart">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button class="plain" type="submit">Restart</button>
-</form>{{end}}</td>
+</form>{{end}}{{end}}</td>
 </tr>
 {{end}}
 </table>
 {{else}}<p>There are no tenants.</p>{{end}}
+<h2>Account deletions</h2>
+{{if .Deletions}}<table>
+<tr><th>Tenant</th><th>Requested</th><th>Check</th><th>Still pending</th><th>Last checked</th><th>Completed</th></tr>
+{{range .Deletions}}<tr>
+<td>{{.Tenant}}</td>
+<td>{{.Requested}}</td>
+<td>{{.State}}{{if .Detail}}: {{.Detail}}{{end}}</td>
+<td>{{if .Pending}}{{.Pending}}{{else}}<span class="muted">none</span>{{end}}</td>
+<td>{{if .Checked}}{{.Checked}}{{else}}<span class="muted">never</span>{{end}}</td>
+<td>{{if .Done}}{{.Done}}{{else}}<span class="muted">tombstone kept</span>{{end}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}<p>No account has been deleted.</p>{{end}}

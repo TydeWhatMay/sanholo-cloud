@@ -34,14 +34,14 @@
 <p>A notification carries the alert title, the alert text from your SanHolo instance (up to 240 characters) and a link to your Bridge. Notifications are delivered through the push service of your browser's vendor. The content is encrypted on SanHolo's server with your browser's keys, so the push service passes it on without being able to read it. The push service does see that a notification was sent to your browser, and when.</p>
 
 <h3>Email sent to you</h3>
-<p>Invites, sign-in links and notices that a passkey was added are queued before sending. The text of a queued email is erased when the email is sent or given up on. The queue entry is deleted 7 days after that.</p>
+<p>Invites, sign-in links, notices that a passkey was added, export links and the confirmation of a deletion are queued before sending. The text of a queued email is erased when the email is sent or given up on. The queue entry is deleted 7 days after it was created.</p>
 
 <h3>Technical data</h3>
 <p>Rate limits on the waiting list, sign-up, sign-in and passkey forms are keyed on your IP address (for IPv6, the network it belongs to) and, for sign-in, on a hash of the email address entered. These records are deleted after 2 days.</p>
 <p>Server logs record the time, the page requested, the response status and the IP address of each request. They are kept for [log retention to be set at launch].</p>
 
 <h3>Administrator actions</h3>
-<p>Every action an administrator takes (issuing an invite, suspending an account) is recorded with the time and the administrator. An invite is recorded by its internal identifier, not by the email address. The identifier links to nothing once the invite is deleted.</p>
+<p>Every action an administrator takes (issuing an invite, suspending an account) is recorded with the time and the administrator. An invite is recorded by its internal identifier, not by the email address. The identifier links to nothing once the invite is deleted. Deleting an account is recorded in the same way, by the random identifiers of the account and the tenant, with the time.</p>
 
 <h2>What SanHolo Hosted does not collect</h2>
 <p>SanHolo Hosted runs no analytics, no advertising and no third-party scripts. The pages load scripts and styles from sanholo.space only, and the content security policy refuses everything else. Data is not sold or shared for advertising.</p>
@@ -68,19 +68,27 @@
 <ul>
 <li>Waiting list entry: until you create an account, or until you ask for it to be removed.</li>
 <li>Invites: 14 days after they expire. An invite is valid for 14 days.</li>
-<li>Account, game account record, game token and instance volume: until you delete your account or disconnect your game account.</li>
+<li>Account, game account record, game token and instance volume: until you delete your account or disconnect your game account. The deletion record without personal data stays until the deletion has finished and been checked.</li>
 <li>Push subscriptions: until you turn notifications off, until your browser's push service reports the subscription as gone, or until you delete your account. A subscription stays when you sign out.</li>
 <li>Sessions: 30 days after last use.</li>
 <li>Sign-in links and requests: 1 day after use or expiry.</li>
-<li>Queued email: the text is erased when the email is sent or given up on. The queue entry is deleted 7 days after that.</li>
+<li>Queued email: the text is erased when the email is sent or given up on. The queue entry is deleted 7 days after it was created.</li>
+<li>Export links: a hash of the link is kept until 1 day after it expires.</li>
 <li>Rate-limit records: 2 days.</li>
 <li>Backups: encrypted nightly backups of the database and instance volumes are kept for 30 days. Data you delete remains in backups taken before the deletion until they expire, at most 30 days, and in the secrets store's internal log until it is compacted. A deleted account is not restored from a backup.</li>
 <li>Administrator record: kept while the service runs. It holds no email addresses, no hashes of them and no tokens.</li>
 </ul>
 
 <h2>Export and deletion</h2>
-<p>The account page offers an export of your data as a ZIP file. The download link works once and expires after 24 hours. The export never contains your game token.</p>
-<p>Deleting your account stops your SanHolo instance, deletes your game token from the secrets store, deletes your instance volume and deletes every database record belonging to your account. Deletion is permanent.</p>
+<h3>Export</h3>
+<p>The account page offers an export of your data as a ZIP file. SanHolo emails you a download link and shows it once on the page. The download link works once, only while you are signed in to the account it belongs to, and expires after 24 hours. SanHolo stores a hash of the link, not the link.</p>
+<p>The ZIP file holds your email address and creation date, the invites for your address without their codes, your sessions, your passkeys without their keys, your notification subscriptions with only the host name of the push service, your game account record, the state and version of your SanHolo instance, and the files your instance exports: its catalog database, goals, jobs, decisions and activity log. The ZIP file is built while it downloads and is not stored. The export never contains your game token or any other credential. If your instance is not running, the ZIP file holds the first part only and says so.</p>
+<h3>Deletion</h3>
+<p>Deleting your account needs you to type its email address. It stops your SanHolo instance, deletes your game token from the secrets store, deletes your instance volume and deletes every database record belonging to your account: the account, sessions, passkeys, notification subscriptions, game account record, export links, the waiting list entry and invites for your address, and queued email to it. Deletion is permanent.</p>
+<p>The game account at Replicant Space is not deleted. That is done in the game.</p>
+<p>If the secrets store or the disk volume cannot complete a deletion at once, SanHolo records it and retries until it succeeds. Until then the token or the volume is still there, and the deletion confirmation says so. Until that has finished, SanHolo keeps a record with a random identifier and the creation date of the account, and no personal data. SanHolo then checks that nothing of your account is left in the database, the secrets store or on the servers.</p>
+<p>SanHolo emails a confirmation to your address. That queued email holds your address. It is dropped if it cannot be sent within a day, and the queue entry is deleted at most 7 days after it was created.</p>
+<p>Backups made before the deletion keep your data until they expire, at most 30 days. A deleted account is not restored from a backup: SanHolo keeps a deletion log outside the database with the random account and tenant identifiers of deleted accounts, and deletes those accounts again after a restore. The log holds no email addresses.</p>
 
 <h2>Your rights</h2>
 <p>Under the GDPR you can request access to, correction of, or deletion of your data, object to its processing, restrict its processing, or request a copy in a machine-readable format. Requests go to <a href="mailto:hello@tydewhatmay.eu">hello@tydewhatmay.eu</a>. You can also complain to a data protection authority. The authority for TydeWhatMay is the Berlin Commissioner for Data Protection and Freedom of Information.</p>

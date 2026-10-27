@@ -410,6 +410,38 @@ func TestDeleteVolumeNeedsTheJobStoppedFirst(t *testing.T) {
 	}
 }
 
+func TestLeftoversReportsTheJobAndTheVolume(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.running(t, "acme")
+	job, vol, err := e.svc.Leftovers(ctx, "acme")
+	if err != nil || !job || !vol {
+		t.Fatalf("running: job=%v volume=%v err=%v, want both", job, vol, err)
+	}
+	if err := e.svc.Stop(ctx, "acme", false); err != nil {
+		t.Fatal(err)
+	}
+	// Stopped but still registered: the job is a leftover until it is purged.
+	if job, vol, _ = e.svc.Leftovers(ctx, "acme"); !job || !vol {
+		t.Errorf("stopped: job=%v volume=%v, want both", job, vol)
+	}
+	if err := e.svc.Stop(ctx, "acme", true); err != nil {
+		t.Fatal(err)
+	}
+	if job, vol, _ = e.svc.Leftovers(ctx, "acme"); job || !vol {
+		t.Errorf("purged: job=%v volume=%v, want only the volume", job, vol)
+	}
+	if err := e.svc.DeleteVolume(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if job, vol, err = e.svc.Leftovers(ctx, "acme"); err != nil || job || vol {
+		t.Errorf("deleted: job=%v volume=%v err=%v, want neither", job, vol, err)
+	}
+	if _, _, err := e.svc.Leftovers(ctx, "Not A Tenant"); err == nil {
+		t.Error("an invalid tenant id was accepted")
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

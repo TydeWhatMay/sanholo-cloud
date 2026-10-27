@@ -54,7 +54,15 @@
 </tr>
 {{end}}
 </table>
-<form method="post" action="/signout">
+{{if .ExportAvailable}}<h2>Export my data</h2>
+<p>SanHolo emails you a download link for a ZIP file with your account record and your bot's data. It never contains your game token.</p>
+<form method="post" action="/account/export">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit">Export my data</button>
+</form>
+{{end}}{{if .DeleteAvailable}}<h2>Delete account</h2>
+<p><a href="/account/delete">Delete my account</a></p>
+{{end}}<form method="post" action="/signout">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <p><button type="submit">Sign out</button></p>
 </form>

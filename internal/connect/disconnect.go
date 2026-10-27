@@ -79,20 +79,12 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 	// deleted: a start that passed its checks before this disconnect must not
 	// register the job after the stop, nor recreate the instance row after it
 	// is deleted. Lock order: this lock, then the tenants row.
-	unlock := func() {}
+	unlock, err := s.lockTenant(ctx, tenantID)
+	if err != nil {
+		return out, err
+	}
+	defer func() { unlock() }()
 	if s.prov.Enabled() {
-		lctx, cancel := context.WithTimeout(ctx, s.lockWait)
-		u, err := s.prov.LockTenant(lctx, tenantID)
-		cancel()
-		if errors.Is(err, context.DeadlineExceeded) {
-			return out, ErrLockTimeout
-		}
-		if err != nil {
-			s.log.Warn("connect: could not lock the tenant", "tenant", tenantID, "error", err)
-			return out, ErrStopFailed
-		}
-		unlock = u
-		defer func() { unlock() }()
 		for _, purge := range []bool{false, true} {
 			if err := s.prov.StopLocked(ctx, tenantID, purge); err != nil {
 				s.log.Warn("connect: could not stop the bot", "tenant", tenantID, "purge", purge, "error", err)
@@ -102,7 +94,7 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 	}
 	wantSecret, wantVolume := s.sec.Enabled(), s.prov.Enabled()
 	now := s.now()
-	err := func() error {
+	err = func() error {
 		tx, err := s.pool.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("connect: disconnect: %w", err)
@@ -150,6 +142,28 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 		out.SecretPending = !s.cleanup(ctx, tenantID, KindSecret)
 	}
 	return out, nil
+}
+
+// lockTenant takes the tenant's provisioning lock for a change that stops its
+// bot and then edits rows (disconnect, account deletion). Without
+// provisioning there is nothing to serialise against and the returned unlock
+// does nothing. ErrLockTimeout: a start or change holds the lock; nothing was
+// changed.
+func (s *Service) lockTenant(ctx context.Context, tenantID string) (func(), error) {
+	if !s.prov.Enabled() {
+		return func() {}, nil
+	}
+	lctx, cancel := context.WithTimeout(ctx, s.lockWait)
+	defer cancel()
+	u, err := s.prov.LockTenant(lctx, tenantID)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, ErrLockTimeout
+	}
+	if err != nil {
+		s.log.Warn("connect: could not lock the tenant", "tenant", tenantID, "error", err)
+		return nil, ErrStopFailed
+	}
+	return u, nil
 }
 
 // cleanupDue is the SQL condition (with the clock as $2) for a pending
@@ -289,6 +303,10 @@ func (s *Service) RetryCleanups(ctx context.Context) int {
 			}
 		}
 	}
+	// Account deletions: finish the ones that stopped half way, then verify
+	// the ones whose cleanups have run.
+	s.resumeDeletions(ctx)
+	s.verifyDeletions(ctx)
 	return done
 }
 

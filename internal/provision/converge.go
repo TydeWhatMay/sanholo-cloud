@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 
 	"github.com/lhaig/sanholo-cloud/internal/audit"
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
@@ -222,4 +223,25 @@ func (s *Service) finishVolumeDeletion(ctx context.Context, tenantID string) err
 	}
 	_, err := s.pool.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = 'volume'`, tenantID)
 	return err
+}
+
+// Leftovers reports whether Nomad still holds the tenant's job (stopped or
+// not) or its host volume. Account deletion's check reads it; both are false
+// once the deletion is complete.
+func (s *Service) Leftovers(ctx context.Context, tenantID string) (job, volume bool, err error) {
+	if !s.Enabled() {
+		return false, false, ErrDisabled
+	}
+	jobID, err := nomad.JobID(tenantID)
+	if err != nil {
+		return false, false, ErrNotFound
+	}
+	switch _, err := s.nomad.Job(ctx, jobID); {
+	case err == nil:
+		job = true
+	case !errors.Is(err, nomad.ErrNotFound):
+		return false, false, err
+	}
+	volume, err = s.nomad.HostVolumeExists(ctx, tenantID)
+	return job, volume, err
 }

@@ -18,15 +18,12 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/config"
-	"github.com/lhaig/sanholo-cloud/internal/connect"
 	"github.com/lhaig/sanholo-cloud/internal/db"
-	"github.com/lhaig/sanholo-cloud/internal/game"
+	"github.com/lhaig/sanholo-cloud/internal/export"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
-	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/proxy"
 	"github.com/lhaig/sanholo-cloud/internal/push"
-	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 	"github.com/lhaig/sanholo-cloud/internal/updater"
 	"github.com/lhaig/sanholo-cloud/internal/workload"
@@ -39,6 +36,12 @@ var version = "dev"
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "operator" {
 		if err := runOperator(context.Background(), os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "deletions" {
+		if err := runDeletions(context.Background(), os.Args[2:], os.Stdout); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -74,38 +77,7 @@ func main() {
 
 	// The secrets client is built here so a bad qm address or token file
 	// stops the service at start.
-	sec, err := secrets.New(secrets.Config{
-		Addr: cfg.QM.Addr, RoleID: cfg.QM.RoleID, SecretID: cfg.QM.SecretID, SecretIDFile: cfg.QM.SecretIDFile,
-		Token: cfg.QM.Token, TokenFile: cfg.QM.TokenFile,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	if sec.Enabled() {
-		if err := sec.Ready(ctx); err != nil {
-			log.Printf("secrets: qm not ready at start: %v", err)
-		}
-	} else {
-		log.Print("secrets: QM_ADDR not set; storing game tokens is disabled")
-	}
-	gc, err := game.New(game.Config{BaseURL: cfg.GameURL, Version: version})
-	if err != nil {
-		log.Fatal(err)
-	}
-	conn, err := connect.New(pool, sec, gc, slog.Default(), cfg.Beta.MaxGameAccountsPerTenant)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Provisioning: without NOMAD_ADDR the service is disabled and tenants
-	// stay "not provisioned".
-	nc, err := nomad.New(cfg.Nomad.Client)
-	if err != nil {
-		log.Fatal(err)
-	}
-	prov, err := provision.New(pool, nc, provision.Options{
-		Settings: cfg.Nomad.Job, Volume: cfg.Nomad.Volume, Version: cfg.Nomad.Version, Timeout: cfg.Nomad.Timeout, Logger: slog.Default(),
-	})
+	_, prov, conn, err := buildCore(ctx, cfg, pool)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -115,8 +87,6 @@ func main() {
 	} else {
 		log.Print("provisioning: NOMAD_ADDR not set; tenant bots are not started")
 	}
-
-	conn.SetProvisioner(prov)
 	go conn.RunCleanups(ctx, time.Minute)
 
 	upd := updater.New(pool, prov, updater.Options{
@@ -158,6 +128,11 @@ func main() {
 	adm.SetProvisioner(prov)
 	adm.SetUpdater(upd)
 	web := &server.App{Auth: svc, Admin: adm, Connect: conn, Provision: prov, TrustedProxies: cfg.TrustedProxies}
+	// The export asks each bot for its data with the proxy's identity; without
+	// the signing key every archive says the bot's data was not available.
+	web.Export = export.New(export.Config{
+		Pool: pool, BaseURL: cfg.AppBaseURL, Key: cfg.ProxyKey, Resolver: prov, Logger: slog.Default(),
+	})
 	if cfg.ProxyKey != nil {
 		appURL, err := url.Parse(cfg.AppBaseURL)
 		if err != nil {

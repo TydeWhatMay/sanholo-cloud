@@ -178,7 +178,7 @@ func TestLoadHostedSettings(t *testing.T) {
 			"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8",
 			"QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "role-1", "QM_SECRET_ID_FILE": "/run/secrets/qm-secret-id",
 			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "tok", "SANHOLO_IMAGE_VERSION": "0.7.1",
-			"PROXY_SIGNING_KEY": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+			"PROXY_SIGNING_KEY": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=", "DELETION_LOG_PATH": "/var/lib/sanholo-log/deletions.jsonl",
 		}
 		if key != "" {
 			m[key] = val
@@ -232,6 +232,7 @@ func TestLoadHostedSettings(t *testing.T) {
 			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "t", "SANHOLO_IMAGE_VERSION": "0.7.1",
 			"PROXY_SIGNING_KEY": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
 			"VAPID_PUBLIC_KEY":  vPub, "VAPID_PRIVATE_KEY": vPriv, "VAPID_SUBJECT": "mailto:ops@tydewhatmay.eu",
+			"DELETION_LOG_PATH": "/var/lib/sanholo-log/deletions.jsonl",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)
@@ -246,6 +247,7 @@ func TestLoadHostedSettings(t *testing.T) {
 				t.Errorf("QM = %+v", c.QM)
 			}
 		}},
+		{"production needs a deletion log", with(prodEnv("DELETION_LOG_PATH", "")), "DELETION_LOG_PATH", nil},
 		{"production needs qm", with(prodEnv("QM_ADDR", "")), "QM_ADDR", nil},
 		{"production refuses http qm", with(prodEnv("QM_ADDR", "http://qm.sanholo.space")), "QM_ADDR", nil},
 		{"qm disabled in development", with(nil), "", func(t *testing.T, c Config) {

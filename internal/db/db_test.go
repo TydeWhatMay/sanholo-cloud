@@ -141,8 +141,8 @@ func TestTenantTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got, ",") != "accounts,game_accounts,push_subscriptions,rollout_tenants,tenant_instances" {
-		t.Fatalf("TenantTables = %v, want [accounts game_accounts push_subscriptions rollout_tenants tenant_instances]", got)
+	if strings.Join(got, ",") != "accounts,export_links,game_accounts,push_subscriptions,rollout_tenants,tenant_instances" {
+		t.Fatalf("TenantTables = %v, want [accounts export_links game_accounts push_subscriptions rollout_tenants tenant_instances]", got)
 	}
 
 	// A future table with tenant_id appears with no hand-kept list; a view
@@ -160,8 +160,37 @@ func TestTenantTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got, ",") != "accounts,game_accounts,push_subscriptions,rollout_tenants,sessions,tenant_instances" {
-		t.Fatalf("TenantTables = %v, want [accounts game_accounts push_subscriptions rollout_tenants sessions tenant_instances]", got)
+	if strings.Join(got, ",") != "accounts,export_links,game_accounts,push_subscriptions,rollout_tenants,sessions,tenant_instances" {
+		t.Fatalf("TenantTables = %v, want [accounts export_links game_accounts push_subscriptions rollout_tenants sessions tenant_instances]", got)
+	}
+}
+
+func TestAccountTables(t *testing.T) {
+	ctx := context.Background()
+	pool := dbtest.Migrated(t)
+	want := "account_sessions,export_links,magic_links,passkeys,push_subscriptions,webauthn_challenges"
+	got, err := db.AccountTables(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != want {
+		t.Fatalf("AccountTables = %v, want %s", got, want)
+	}
+	// A later table keyed by account_id appears with no hand-kept list. A
+	// column of another type, another name or a view does not count, and the
+	// deletion record's deleted_account is not an account_id.
+	for _, q := range []string{
+		"CREATE TABLE later (account_id uuid, n int)",
+		"CREATE TABLE text_keyed (account_id text)",
+		"CREATE TABLE other_name (owner_id uuid)",
+		"CREATE VIEW sessions_view AS SELECT account_id FROM account_sessions",
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err = db.AccountTables(ctx, pool); err != nil || strings.Join(got, ",") != "account_sessions,export_links,later,magic_links,passkeys,push_subscriptions,webauthn_challenges" {
+		t.Fatalf("AccountTables = %v (%v)", got, err)
 	}
 }
 

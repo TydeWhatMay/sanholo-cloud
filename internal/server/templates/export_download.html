@@ -1,0 +1,9 @@
+<h1>Download your SanHolo data</h1>
+<p>Press the button to download a ZIP file with your account record and your bot's data. The link works once. If the download is interrupted, ask for a new export on your account page.</p>
+<p>Building the file can take a few minutes when your bot holds a lot of data.</p>
+<form method="post" action="/account/export/download" hx-boost="false">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="token" value="{{.Token}}">
+<button type="submit">Download</button>
+</form>
+<p><a href="/account">Back to your account</a></p>

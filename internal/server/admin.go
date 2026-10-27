@@ -105,7 +105,25 @@ func (a *App) adminTenants(c *fiber.Ctx) error {
 		}
 		rows = append(rows, r)
 	}
-	return a.adminPage(c, "admin_tenants", "Tenants", fiber.Map{"Tenants": rows})
+	dels, err := a.Admin.Deletions(c.UserContext())
+	if err != nil {
+		return a.serverError(c)
+	}
+	type delRow struct {
+		Tenant, Requested, State, Detail, Pending, Checked, Done string
+	}
+	drows := make([]delRow, 0, len(dels))
+	for _, d := range dels {
+		r := delRow{Tenant: d.TenantID, Requested: d.RequestedAt.UTC().Format(timeFmt), State: d.CheckState, Detail: d.CheckDetail, Pending: d.Pending}
+		if d.CheckedAt != nil {
+			r.Checked = d.CheckedAt.UTC().Format(timeFmt)
+		}
+		if d.CompletedAt != nil {
+			r.Done = d.CompletedAt.UTC().Format(timeFmt)
+		}
+		drows = append(drows, r)
+	}
+	return a.adminPage(c, "admin_tenants", "Tenants", fiber.Map{"Tenants": rows, "Deletions": drows})
 }
 
 func (a *App) adminWaitlist(c *fiber.Ctx) error {

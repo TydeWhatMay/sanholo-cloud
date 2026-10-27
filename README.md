@@ -288,6 +288,71 @@ by the next start before it makes a new volume, so another game account never
 inherits the old data. The disconnect holds the tenant's provisioning lock from
 the stop to the commit. Lock order: that lock, then the tenants row.
 
+### Data export (US-017)
+
+`/account` offers "Export my data" (session, CSRF, 3 requests a day per
+account). It makes a single-use download link valid for 24 hours, stores only
+its SHA-256 (`export_links`, bound to the account) and queues it by email; the
+page shows it once. `GET /account/export/download?token=...` only shows a
+page with a Download button (HEAD and prefetch answer 204, as for
+`/signin/verify`); the button POSTs the token, which spends the link and
+streams the ZIP. The link works for its own account's session only.
+
+The ZIP is built while it is sent (`internal/export`): `account.json` (email,
+created date, invites for the address without codes, live sessions, passkeys
+without key material, push subscriptions with the endpoint host only, the game
+account record, instance state and version), `instance/` (the entries of the
+bot's `GET /hosted/export`, fetched with a freshly signed identity as the proxy
+does, and passed through by a streaming ZIP reader, `export/zipstream.go`,
+so a catalog of several hundred MB is never held) and `README.txt`. If the bot
+is not running, is busy (429, retried twice for at most `BusyWait`) or fails,
+the archive still holds `account.json` and the README says the bot's data was
+not available. At most 4 archives are built at once (a fifth gets 503 and its
+link stays unspent). A download cut off half way has spent its link; the
+account can ask again.
+
+### Deleting an account (US-018)
+
+`/account/delete` asks for the account's email address, then
+`connect.Service.DeleteAccount` runs (same lock order as the disconnect: the
+tenant's provisioning lock, then the tenants row):
+
+1. one transaction marks the tenant `deleting` (Bridge access, starts and
+   connects end), records it in `tenant_deletions` and audits it;
+2. the deletion is appended to the deletion log (`DELETION_LOG_PATH`);
+3. the bot is stopped, then purged from Nomad. A failure leaves the tenant
+   `deleting` with everything else intact; the cleanup worker finishes it after
+   5 minutes;
+4. one transaction deletes every row of the tenant and the account (the tables
+   come from `db.TenantTables`, the schema's `tenant_id` columns, and the rows
+   keyed by the address: waiting list, invites, queued mail, sign-in requests,
+   rate-limit keys), records the qm purge and the volume deletion in
+   `pending_cleanups` and queues the confirmation email;
+5. the volume and then the qm secret are deleted (backoff as for the
+   disconnect) and the check job runs.
+
+The tombstone is the `tenants` row (random id, `deleting`, creation date)
+plus a `tenant_deletions` row (tenant id, account id, request time, last check
+state and detail). Neither holds personal data. It stays until every cleanup
+is done and a check has passed, then the `tenants` row is removed (under its
+row lock, after counting again) and `tenant_deletions.deleted_account` is nulled.
+The check job (`connect/verify.go`) runs after the deletion and on every cleanup
+pass: no row in any `db.TenantTables` table; no row in any table with a foreign
+key to `accounts` for the deleted account id; right after the deletion only,
+nothing keyed by the address or its hash; qm has no version of the secret (or
+"qm purge pending" while Part E is missing); Nomad has neither job nor volume.
+A leftover that a cleanup can remove is queued again. `/admin` lists the
+deletions with their pending cleanups and last check.
+
+The confirmation email holds the address, so it expires after 24 hours (the
+outbox then fails it and erases its text) and `auth.Cleanup` deletes every sent
+or failed outbox row 7 days after it was created: the address is out of the
+database at most 7 days after the deletion.
+
+`sanholo-cloud deletions reapply [<log>]` deletes again the accounts that
+the deletion log names and a restored database still holds
+(deploy/README.md, "After a restore").
+
 ### Bridge access and the proxy
 
 With `PROXY_SIGNING_KEY` set the control plane also serves each customer's
