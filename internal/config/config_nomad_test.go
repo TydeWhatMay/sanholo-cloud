@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,6 +142,10 @@ func TestLoadNomadRequiredInProduction(t *testing.T) {
 		t.Fatalf("production without a deletion log: %v", err)
 	}
 	prod["DELETION_LOG_PATH"] = "/var/lib/sanholo-log/deletions.jsonl"
+	if _, err := Load(env(prod)); err == nil || !strings.Contains(err.Error(), "INTERNAL_LISTEN_ADDR") {
+		t.Fatalf("production without the platform listener: %v", err)
+	}
+	maps.Copy(prod, internalEnv(t))
 	if _, err := Load(env(prod)); err != nil {
 		t.Fatalf("production with Nomad: %v", err)
 	}

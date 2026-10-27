@@ -143,16 +143,12 @@ func (a *App) alertIntake(c *fiber.Ctx) error {
 	if a.Workload == nil || a.Push == nil || a.PushStore == nil {
 		return jsonStatus(c, fiber.StatusServiceUnavailable, "alerts are not available")
 	}
-	h := c.Get("Authorization")
-	token, ok := strings.CutPrefix(h, "Bearer ")
-	if !ok {
-		token, ok = strings.CutPrefix(h, "bearer ")
-	}
+	token, ok := bearerToken(c)
 	if !ok {
 		c.Set("WWW-Authenticate", "Bearer")
 		return jsonStatus(c, fiber.StatusUnauthorized, "unauthorized")
 	}
-	claims, err := a.Workload.Verify(c.UserContext(), strings.TrimSpace(token))
+	claims, err := a.Workload.Verify(c.UserContext(), token)
 	switch {
 	case errors.Is(err, workload.ErrUnavailable):
 		slog.Warn("alerts: Nomad signing keys unavailable")

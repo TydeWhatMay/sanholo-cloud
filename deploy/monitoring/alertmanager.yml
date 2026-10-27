@@ -1,0 +1,33 @@
+# Alertmanager for SanHolo Hosted (US-023; deploy/README.md section 9).
+# One receiver: the control plane's operator alert intake, which pushes to
+# the operator's own browsers (Web Push). No third-party service.
+route:
+  receiver: sanholo-operator
+  # One notification per alert and subject; the intake pushes each alert
+  # once per state change and repeats a firing one at most every 3 hours.
+  group_by: [alertname, tenant, target, instance]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: sanholo-operator
+    webhook_configs:
+      # The platform listener (INTERNAL_LISTEN_ADDR) on the private network.
+      - url: http://10.0.0.2:9464/internal/operator-alerts # EXAMPLE address
+        send_resolved: true
+        # Below the intake's own bound (opalert.MaxAlerts = 50).
+        max_alerts: 20
+        http_config:
+          authorization:
+            type: Bearer
+            # The contents of ALERTMANAGER_TOKEN_FILE.
+            credentials_file: /etc/alertmanager/secrets/sanholo-alerts-token
+
+inhibit_rules:
+  # A sealed qm explains every qm symptom.
+  - source_matchers: [alertname="QMSealed"]
+    target_matchers: [alertname=~"QMUnreachable|QMProbeStale"]
+  # With the control plane down its own metrics are stale, not wrong.
+  - source_matchers: [alertname="ControlPlaneDown"]
+    target_matchers: [alertname=~"QMProbeStale|ControlPlaneDatabaseDown"]

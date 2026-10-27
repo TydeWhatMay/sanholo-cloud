@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lhaig/sanholo-cloud/internal/admin"
@@ -21,9 +22,12 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/db"
 	"github.com/lhaig/sanholo-cloud/internal/export"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
+	"github.com/lhaig/sanholo-cloud/internal/metrics"
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
+	"github.com/lhaig/sanholo-cloud/internal/opalert"
 	"github.com/lhaig/sanholo-cloud/internal/proxy"
 	"github.com/lhaig/sanholo-cloud/internal/push"
+	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 	"github.com/lhaig/sanholo-cloud/internal/updater"
 	"github.com/lhaig/sanholo-cloud/internal/workload"
@@ -77,7 +81,7 @@ func main() {
 
 	// The secrets client is built here so a bad qm address or token file
 	// stops the service at start.
-	_, prov, conn, err := buildCore(ctx, cfg, pool)
+	sec, prov, conn, err := buildCore(ctx, cfg, pool)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -150,6 +154,20 @@ func main() {
 		log.Print("proxy: PROXY_SIGNING_KEY not set; Bridges are not served and every Host reaches the control plane")
 	}
 	wirePush(ctx, cfg, pool, web)
+	if cfg.Internal.Enabled() {
+		platform := buildPlatform(ctx, cfg, pool, sec, web.Push)
+		go func() {
+			<-ctx.Done()
+			_ = platform.Shutdown()
+		}()
+		go func() {
+			if err := platform.Listen(cfg.Internal.Addr); err != nil {
+				log.Fatalf("platform listener: %v", err)
+			}
+		}()
+	} else {
+		log.Print("platform: INTERNAL_LISTEN_ADDR not set; /metrics and the operator alert intake are off")
+	}
 	app := server.New(pool, server.WithApp(web))
 	go func() {
 		<-ctx.Done()
@@ -158,6 +176,27 @@ func main() {
 	if err := app.Listen(cfg.ListenAddr); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// buildPlatform assembles the platform listener (US-023): the metrics
+// source, with a qm health probe when qm is configured, and the operator
+// alert intake when Web Push is.
+func buildPlatform(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, sec *secrets.Client, svc *push.Service) *fiber.App {
+	src := &metrics.Source{DB: pool, Version: version}
+	if sec.Enabled() {
+		src.QM = metrics.NewQMProbe(sec.Ready, nil)
+		go src.QM.Run(ctx, 30*time.Second)
+	}
+	p := server.Platform{MetricsToken: cfg.Internal.MetricsToken, Metrics: src}
+	if svc != nil {
+		src.Push = svc.Stats
+		intake := opalert.New(svc, nil)
+		src.Alerts = intake.Stats
+		p.AlertsToken, p.Alerts = cfg.Internal.AlertsToken, intake
+	} else if cfg.Internal.AlertsToken != "" {
+		log.Print("platform: VAPID keys not set; the operator alert intake is off")
+	}
+	return server.NewPlatform(p)
 }
 
 // wirePush turns on Web Push (VAPID keys) and the alert intake (Nomad JWKS).

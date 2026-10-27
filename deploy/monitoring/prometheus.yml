@@ -1,0 +1,90 @@
+# Prometheus for SanHolo Hosted (US-007, US-023; deploy/README.md section 9).
+# Addresses marked EXAMPLE are placeholders for the infra session. Secrets are
+# files only (credentials_file), never inline.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - sanholo.rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"] # EXAMPLE: Alertmanager next to Prometheus
+
+scrape_configs:
+  # The control plane's platform listener (INTERNAL_LISTEN_ADDR), private
+  # network only. Bearer: the contents of METRICS_TOKEN_FILE.
+  - job_name: sanholo-cloud
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/sanholo-metrics-token
+    static_configs:
+      - targets: ["10.0.0.2:9464"] # EXAMPLE: the control plane's private address
+
+  # Every tenant bot, found through Nomad's service catalogue (service
+  # sanholo-bot, tag tenant=<id>, provider nomad, namespace sanholo).
+  #
+  # NOT SCRAPABLE YET: the client serves /metrics only with a valid
+  # X-SanHolo-Identity, an Ed25519 token signed per request by the control
+  # plane's proxy key, which Prometheus cannot produce. Every target answers
+  # 401 until the client follow-up in section 9 lands. The job stays so the
+  # discovery and labels are ready; the TenantThrottled alert needs it.
+  - job_name: sanholo-tenants
+    metrics_path: /metrics
+    nomad_sd_configs:
+      - server: https://nomad.sanholo.internal:4646 # EXAMPLE: NOMAD_ADDR
+        namespace: sanholo
+        refresh_interval: 60s
+        authorization:
+          type: Bearer
+          # A Nomad ACL token with read-job on namespace sanholo, nothing
+          # more (policy in section 9).
+          credentials_file: /etc/prometheus/secrets/nomad-sd-token
+    relabel_configs:
+      - source_labels: [__meta_nomad_service]
+        regex: sanholo-bot
+        action: keep
+      # __meta_nomad_tags is ",tag1,tag2,"; the job carries tenant=<id>.
+      - source_labels: [__meta_nomad_tags]
+        regex: .*,tenant=([a-z0-9-]+),.*
+        target_label: tenant
+        replacement: $1
+      - source_labels: [__meta_nomad_service_job_id]
+        target_label: job_id
+      - source_labels: [__meta_nomad_node_id]
+        target_label: nomad_node
+
+  # Nomad agents: per-allocation restarts and memory (telemetry block in
+  # section 9: prometheus_metrics, publish_allocation_metrics,
+  # publish_node_metrics). The tenant id is the job label minus
+  # "sanholo-tenant-".
+  - job_name: nomad
+    metrics_path: /v1/metrics
+    params:
+      format: [prometheus]
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/nomad-sd-token
+    static_configs:
+      - targets: # EXAMPLE: every Nomad server and client
+          - nomad-1.sanholo.internal:4646
+          - tenant-node-1.sanholo.internal:4646
+    # Nomad's own "job" label clashes with the target's and is kept as
+    # exported_job.
+    metric_relabel_configs:
+      - source_labels: [exported_job]
+        regex: sanholo-tenant-([a-z0-9-]+)
+        target_label: tenant
+        replacement: $1
+
+  # node_exporter on every host: disk usage and the backup jobs' textfile
+  # metrics (sanholo_backup_*).
+  - job_name: node
+    static_configs:
+      - targets: # EXAMPLE: every host, private addresses
+          - 10.0.0.2:9100
+          - 10.0.0.3:9100

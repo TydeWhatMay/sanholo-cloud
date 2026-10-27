@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"strings"
 	"testing"
 )
@@ -171,6 +172,7 @@ func TestLoadHostedSettings(t *testing.T) {
 	// prodEnv is a complete production environment with one key replaced
 	// (an empty value removes it).
 	vPub, vPriv := vapidPair(t)
+	platform := internalEnv(t)
 	prodEnv := func(key, val string) map[string]string {
 		m := map[string]string{
 			"VAPID_PUBLIC_KEY": vPub, "VAPID_PRIVATE_KEY": vPriv, "VAPID_SUBJECT": "mailto:ops@tydewhatmay.eu",
@@ -180,6 +182,7 @@ func TestLoadHostedSettings(t *testing.T) {
 			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "tok", "SANHOLO_IMAGE_VERSION": "0.7.1",
 			"PROXY_SIGNING_KEY": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=", "DELETION_LOG_PATH": "/var/lib/sanholo-log/deletions.jsonl",
 		}
+		maps.Copy(m, platform)
 		if key != "" {
 			m[key] = val
 		}
@@ -232,7 +235,9 @@ func TestLoadHostedSettings(t *testing.T) {
 			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "t", "SANHOLO_IMAGE_VERSION": "0.7.1",
 			"PROXY_SIGNING_KEY": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
 			"VAPID_PUBLIC_KEY":  vPub, "VAPID_PRIVATE_KEY": vPriv, "VAPID_SUBJECT": "mailto:ops@tydewhatmay.eu",
-			"DELETION_LOG_PATH": "/var/lib/sanholo-log/deletions.jsonl",
+			"DELETION_LOG_PATH":    "/var/lib/sanholo-log/deletions.jsonl",
+			"INTERNAL_LISTEN_ADDR": platform["INTERNAL_LISTEN_ADDR"], "METRICS_TOKEN_FILE": platform["METRICS_TOKEN_FILE"],
+			"ALERTMANAGER_TOKEN_FILE": platform["ALERTMANAGER_TOKEN_FILE"],
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)
@@ -247,6 +252,8 @@ func TestLoadHostedSettings(t *testing.T) {
 				t.Errorf("QM = %+v", c.QM)
 			}
 		}},
+		{"production needs the platform listener", with(prodEnv("INTERNAL_LISTEN_ADDR", "")), "INTERNAL_LISTEN_ADDR is required", nil},
+		{"production needs the alertmanager token", with(prodEnv("ALERTMANAGER_TOKEN_FILE", "")), "ALERTMANAGER_TOKEN_FILE are required", nil},
 		{"production needs a deletion log", with(prodEnv("DELETION_LOG_PATH", "")), "DELETION_LOG_PATH", nil},
 		{"production needs qm", with(prodEnv("QM_ADDR", "")), "QM_ADDR", nil},
 		{"production refuses http qm", with(prodEnv("QM_ADDR", "http://qm.sanholo.space")), "QM_ADDR", nil},

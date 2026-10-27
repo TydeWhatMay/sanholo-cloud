@@ -60,6 +60,9 @@ type Config struct {
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
+	// Internal is the platform listener for Prometheus and Alertmanager
+	// (US-023). Disabled when its Addr is empty.
+	Internal Internal
 	// DeletionLogPath is DELETION_LOG_PATH: the append-only file that
 	// account deletions are recorded in, outside the database, so that a
 	// restore can re-apply them (deploy/README.md, "After a restore").
@@ -276,6 +279,11 @@ func Load(getenv func(string) string) (Config, error) {
 		// key the tenant jobs hand to the Bridge.
 		c.Nomad.Job.VAPIDPublicKey = push.VAPIDPublic
 	}
+	in, err := internalSettings(getenv, c.ListenAddr, c.Production)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Internal = in
 	c.DeletionLogPath = getenv("DELETION_LOG_PATH")
 	if c.Production && c.DeletionLogPath == "" {
 		errs = append(errs, errors.New("DELETION_LOG_PATH is required when APP_ENV=production: without it a restore from backup brings deleted accounts back"))

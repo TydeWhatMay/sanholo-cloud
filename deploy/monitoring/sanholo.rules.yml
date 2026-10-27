@@ -1,0 +1,155 @@
+# Operator alerts (US-023). Every alert carries a "kind" label (lower-case,
+# hyphens, at most 40 characters): the control plane uses it as the push's
+# kind, so it must stay in that shape. Tested by sanholo.rules.test.yml
+# (promtool test rules).
+groups:
+  - name: sanholo-operator
+    rules:
+      # US-023: instance crash-looping. Nomad's per-allocation restart
+      # counter; three restarts in 15 minutes is a loop, not a blip.
+      - alert: InstanceCrashLooping
+        expr: sum by (tenant) (increase(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[15m])) >= 3
+        labels:
+          severity: critical
+          kind: instance-crashloop
+        annotations:
+          summary: "Bot of tenant {{ $labels.tenant }} restarted {{ $value | humanize }} times in 15 minutes."
+
+      # The control plane gave up on an instance (state failed).
+      - alert: InstanceFailed
+        expr: sanholo_cloud_instances{state="failed"} > 0
+        for: 15m
+        labels:
+          severity: warning
+          kind: instance-failed
+        annotations:
+          summary: "{{ $value | humanize }} tenant instance(s) failed; see /admin."
+
+      # US-023: any tenant throttled (429) more than 5 times in 10 minutes.
+      # Needs the tenant scrape (client follow-up, section 9).
+      - alert: TenantThrottled
+        expr: increase(sanholo_api_throttled_total{job="sanholo-tenants"}[10m]) > 5
+        labels:
+          severity: warning
+          kind: tenant-throttled
+        annotations:
+          summary: "Tenant {{ $labels.tenant }} was throttled by the game {{ $value | humanize }} times in 10 minutes."
+
+      # US-023: qm sealed. Needs the operator's unseal shares.
+      - alert: QMSealed
+        expr: sanholo_cloud_qm_sealed == 1
+        for: 1m
+        labels:
+          severity: critical
+          kind: qm-sealed
+        annotations:
+          summary: "qm is sealed: bots cannot read their game tokens. Unseal per qm's procedure."
+
+      - alert: QMUnreachable
+        expr: sanholo_cloud_qm_up == 0 and sanholo_cloud_qm_sealed == 0
+        for: 5m
+        labels:
+          severity: critical
+          kind: qm-unreachable
+        annotations:
+          summary: "The control plane cannot reach qm (not sealed: network or process)."
+
+      - alert: QMProbeStale
+        expr: time() - sanholo_cloud_qm_last_probe_timestamp_seconds > 300
+        labels:
+          severity: warning
+          kind: qm-probe-stale
+        annotations:
+          summary: "The control plane has not checked qm for over 5 minutes."
+
+      # US-023: backups failed. The last run of a target failed ...
+      - alert: BackupFailed
+        expr: sanholo_backup_last_attempt_ok == 0
+        labels:
+          severity: critical
+          kind: backup-failed
+        annotations:
+          summary: "The {{ $labels.target }} backup on {{ $labels.instance }} failed; see the job's logs."
+
+      # ... or no run succeeded for 26 hours (the job did not run at all).
+      - alert: BackupStale
+        expr: time() - sanholo_backup_last_success_timestamp_seconds > 26 * 3600
+        labels:
+          severity: critical
+          kind: backup-stale
+        annotations:
+          summary: "No successful {{ $labels.target }} backup on {{ $labels.instance }} for {{ $value | humanizeDuration }}."
+
+      # ... or the database backup never reported at all.
+      - alert: BackupMissing
+        expr: absent(sanholo_backup_last_success_timestamp_seconds{target="postgres"})
+        for: 26h
+        labels:
+          severity: critical
+          kind: backup-missing
+        annotations:
+          summary: "No database backup has ever reported success."
+
+      # US-023: disk above 80%.
+      - alert: DiskAlmostFull
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|devtmpfs"}
+                     / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|devtmpfs"}) > 80
+        for: 15m
+        labels:
+          severity: warning
+          kind: disk-full
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} is {{ $value | humanize }}% full."
+
+      # Beyond US-023, from the control plane's own metrics.
+      # Delivered only once the control plane is back: it is the push path.
+      - alert: ControlPlaneDown
+        expr: up{job="sanholo-cloud"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          kind: control-plane-down
+        annotations:
+          summary: "Prometheus cannot scrape the control plane."
+
+      - alert: ControlPlaneDatabaseDown
+        expr: sanholo_cloud_database_up == 0
+        for: 5m
+        labels:
+          severity: critical
+          kind: database-down
+        annotations:
+          summary: "The control plane cannot query its database."
+
+      - alert: ReleaseHalted
+        expr: sanholo_cloud_releases{state="halted"} > 0
+        labels:
+          severity: warning
+          kind: release-halted
+        annotations:
+          summary: "A client rollout is halted; see /admin releases."
+
+      - alert: DeletionCheckFailed
+        expr: sanholo_cloud_tenant_deletions{check_state="failed"} > 0
+        labels:
+          severity: critical
+          kind: deletion-check-failed
+        annotations:
+          summary: "An account deletion left data behind; see /admin, Account deletions."
+
+      - alert: CleanupStuck
+        expr: sanholo_cloud_pending_cleanup_oldest_seconds > 24 * 3600
+        labels:
+          severity: warning
+          kind: cleanup-stuck
+        annotations:
+          summary: "A {{ $labels.kind }} cleanup has waited over a day."
+
+      - alert: MailStuck
+        expr: sanholo_cloud_mail_outbox_oldest_queued_seconds > 3600
+        labels:
+          severity: warning
+          kind: mail-stuck
+        annotations:
+          summary: "Mail has been queued for over an hour: sign-in links are not arriving."

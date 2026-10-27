@@ -156,6 +156,7 @@ is in the client release notes) and make the job run `image@digest`.
 | `ROLLOUT_CANARY_SOAK`, `ROLLOUT_BATCH_SOAK` | Soak after a tenant's deployment turned healthy: 1h for the canary, 10m for other batches (`0` = none). Live check results, restarts and the allocation are watched; see the README. |
 | `TENANT_VOLUME_SIZE_MB`, `TENANT_VOLUME_NODE_POOL`, `TENANT_VOLUME_CONSTRAINT` | The tenant volume, section 2. |
 | `QM_ADDR` | Also given to each bot as `-qm-addr`. |
+| `INTERNAL_LISTEN_ADDR`, `METRICS_TOKEN_FILE`, `ALERTMANAGER_TOKEN_FILE` | Required in production. The platform listener for Prometheus and Alertmanager and its two bearer tokens (section 9). |
 | `DELETION_LOG_PATH` | Required in production. The append-only file account deletions are recorded in (section 8). Put it on a volume that is not restored with the database and is copied off the host. |
 
 No variable that holds a secret is ever copied into a job.
@@ -248,3 +249,268 @@ Restored volumes of deleted tenants must also be removed (Nomad volumes are
 restored with the host backup): `deletions reapply` does this for every tenant it
 re-deletes, through `DeleteVolume`.
 
+
+## 9. Monitoring and operator alerts (US-007, US-023)
+
+Files: `deploy/monitoring/prometheus.yml`, `sanholo.rules.yml` (with
+`sanholo.rules.test.yml`), `alertmanager.yml`. Addresses marked `EXAMPLE` are
+placeholders. Every secret is a file (`credentials_file`), never inline.
+
+### The platform listener
+
+The control plane serves two platform endpoints on a second address,
+`INTERNAL_LISTEN_ADDR`, never on the app address:
+
+| Route | Caller | Bearer |
+| --- | --- | --- |
+| `GET /metrics` | Prometheus | contents of `METRICS_TOKEN_FILE` |
+| `POST /internal/operator-alerts` | Alertmanager | contents of `ALERTMANAGER_TOKEN_FILE` |
+
+- Bind it to the control plane's private address (`10.x.x.x:9464`, say). The
+  edge must not route to it. Each route also needs its own token, so the scrape
+  token cannot send pushes.
+- The tokens: `openssl rand -base64 32`, one each, stored in qm and delivered as
+  files. The same values go to Prometheus
+  (`/etc/prometheus/secrets/sanholo-metrics-token`) and Alertmanager
+  (`/etc/alertmanager/secrets/sanholo-alerts-token`). Changing one means a
+  restart of the control plane and a reload of the caller.
+- The listener speaks plain HTTP. Keep it on the private network (or a
+  WireGuard link); the bearer crosses it in clear.
+- Firewall: Prometheus and Alertmanager to the control plane's internal port;
+  Prometheus to node_exporter (9100) on every host and to every Nomad agent's
+  HTTP port.
+
+### What the control plane exports
+
+All from the database at scrape time or from counters in the process; no label
+carries a tenant id, an email or a token.
+
+- `sanholo_cloud_tenants{status}`, `sanholo_cloud_instances{state}`,
+  `sanholo_cloud_instances_health{health}`
+- `sanholo_cloud_releases{state}`, `sanholo_cloud_rollout_tenants{state}` (the
+  release being rolled out or halted)
+- `sanholo_cloud_pending_cleanups{kind}`, `..._pending_cleanup_oldest_seconds{kind}`,
+  `..._pending_cleanup_max_attempts{kind}`
+- `sanholo_cloud_mail_outbox{state="queued|failed"}`,
+  `sanholo_cloud_mail_outbox_oldest_queued_seconds`
+- `sanholo_cloud_tenant_deletions{check_state}`
+- `sanholo_cloud_push_messages_total{result}`,
+  `sanholo_cloud_push_alerts_dropped_total{reason="cap|queue_full"}`,
+  `sanholo_cloud_push_cap_hits_total`, `sanholo_cloud_operator_alerts_total{result}`
+- `sanholo_cloud_qm_up`, `sanholo_cloud_qm_sealed`,
+  `sanholo_cloud_qm_last_probe_timestamp_seconds` (qm's health checked every 30
+  seconds; absent before the first check)
+- `sanholo_cloud_database_up` (0 when a query of the scrape failed; the
+  database families are then left out, the rest still arrive)
+
+### Other sources
+
+1. **Nomad agents** (job `nomad`): per-allocation restarts and memory. Every
+   agent needs:
+
+   ```hcl
+   telemetry {
+     prometheus_metrics         = true
+     publish_allocation_metrics = true
+     publish_node_metrics       = true
+   }
+   ```
+
+   The crash-loop alert reads `nomad_client_allocs_restart`; Nomad's own `job`
+   label arrives as `exported_job` and the scrape config derives `tenant` from
+   it. Check the metric name against a real agent
+   (`curl $NOMAD_ADDR/v1/metrics?format=prometheus | grep allocs_restart`) and
+   adjust the rule if your version names it differently.
+2. **node_exporter** on every host (job `node`), with the textfile collector
+   enabled (`--collector.textfile.directory=<dir>`). Disk alerts read it, and
+   the backup jobs write `sanholo_backup_*` into that directory (section 10).
+3. **Tenant bots** (job `sanholo-tenants`, Nomad service discovery of
+   `sanholo-bot`, tag `tenant=<id>`). Prometheus needs a Nomad token for the
+   discovery:
+
+   ```hcl
+   namespace "sanholo" { capabilities = ["read-job"] }
+   ```
+
+   **Not scrapable yet.** The client serves `/metrics` only to a request with a
+   valid `X-SanHolo-Identity` (an Ed25519 token the control plane's proxy signs
+   per request, `tenant`/`aud` equal to the instance), which Prometheus cannot
+   produce, so every tenant target answers 401. This is a client follow-up (a
+   scrape bearer, or `/metrics` on a second port mapped to the private network
+   only). Until it lands, `TenantThrottled` and the per-tenant API request
+   dashboards have no data; restarts and memory per tenant come from Nomad.
+
+### Alerts
+
+`sanholo.rules.yml` holds the US-023 alerts and a few from the control plane's
+own metrics. Each alert has a `kind` label (lower case, hyphens, at most 40
+characters), which becomes the push's kind.
+
+| Alert | Fires when |
+| --- | --- |
+| `InstanceCrashLooping` | a tenant's bot restarted 3 or more times in 15 minutes (Nomad) |
+| `TenantThrottled` | a tenant got more than 5 game 429s in 10 minutes (needs the tenant scrape) |
+| `QMSealed` / `QMUnreachable` / `QMProbeStale` | qm sealed for 1 minute / not answering (not sealed) for 5 / not checked for 5 |
+| `BackupFailed` / `BackupStale` / `BackupMissing` | a backup run failed / no success for 26 hours / no database backup ever reported (26 hours) |
+| `DiskAlmostFull` | a filesystem above 80% for 15 minutes |
+| `InstanceFailed`, `ReleaseHalted`, `DeletionCheckFailed`, `CleanupStuck`, `MailStuck`, `ControlPlaneDatabaseDown`, `ControlPlaneDown` | control plane state, see the rule annotations |
+
+### The alert path
+
+Prometheus evaluates the rules, Alertmanager groups them and posts its webhook
+to the control plane's `/internal/operator-alerts`, which pushes each alert to
+the operator's own browsers through the same Web Push path as the bots' alerts
+(every subscription of a tenant that has an operator account). No third-party
+notification service is involved.
+
+- One push per alert per state change: a firing alert is pushed once and again
+  at most every 3 hours while it keeps firing (Alertmanager's
+  `repeat_interval` is 4 hours); a resolved alert is pushed once as
+  "Resolved: ...", and only if its firing push went out.
+- At most 50 alerts are read from one notification (Alertmanager sends 20).
+  Operator pushes share one hourly cap of 30 (then a single "more alerts" push).
+- A push that cannot be queued answers 503; Alertmanager retries and only the
+  missed alerts are pushed.
+- The control plane is the push path: `ControlPlaneDown` reaches the operator
+  only once the control plane is back. Watch the Alertmanager UI, or add a
+  second receiver of the operator's own, if that gap matters.
+
+Checks run on these files: `promtool check config` and `check rules`,
+`promtool test rules sanholo.rules.test.yml` (each US-023 alert at and around
+its threshold), `amtool check-config`, and a real Alertmanager 0.28 posting a
+firing and a resolved alert to the handler.
+
+## 10. Backups and restore (US-022)
+
+### What is backed up, and where
+
+Nightly, encrypted with restic (AES-256, the repository password), to one
+restic repository in Hetzner Object Storage in **a different location** from
+the servers (servers in Falkenstein or Nuremberg: a bucket in Helsinki, say).
+Retention is 30 days (`restic forget --keep-within 30d --prune`, measured from
+the newest snapshot, over the whole repository, so a node that left keeps no
+tenant data past 30 days either).
+
+| Target (restic tag) | Job | When (UTC) | What |
+| --- | --- | --- | --- |
+| `volumes` | `sanholo-backup-volumes` (sysbatch, every tenant node) | 02:30 | every tenant volume; each SQLite catalog copied with SQLite's online backup; `volumes.json` (volume id to `sanholo-tenant-<id>`) |
+| `postgres` | `sanholo-backup-db`, group `postgres` | 03:15 | `pg_dump --format=custom` of the control plane database, then retention |
+| `files` | `sanholo-backup-db`, group `deletion-log` | 03:15 | the deletion log (`DELETION_LOG_PATH`, section 8) |
+
+qm is not in this repository: it is backed up per qm's own procedure (below).
+
+Files: `deploy/backup/Dockerfile` and `backup.sh` (the image),
+`deploy/nomad/sanholo-backup-db.nomad.hcl`,
+`deploy/nomad/sanholo-backup-volumes.nomad.hcl`.
+
+### Setting it up (once)
+
+1. Build and push the image: `docker build -t ghcr.io/tydewhatmay/sanholo-backup:1
+   deploy/backup`, then pin both jobs to its digest.
+2. Create the bucket in the second location and an access key for it only.
+3. Create the repository once, by hand: `restic -r s3:https://<location>.your-objectstorage.com/<bucket>
+   init`. The jobs never create it: a mistyped repository would otherwise
+   become a new, empty one. Keep the repository password in qm **and** offline
+   with the operator: without it no backup can be read.
+4. Namespace `sanholo-ops` for the two jobs (the control plane's token, limited
+   to `sanholo`, cannot change them). Nomad Variables in it:
+   - `nomad/jobs`: `restic_repository`, `restic_password`,
+     `s3_access_key_id`, `s3_secret_access_key` (both jobs);
+   - `nomad/jobs/sanholo-backup-db`: `pg_host`, `pg_port`, `pg_user`,
+     `pg_password`, `pg_database`, `pg_sslmode`, for a PostgreSQL role that can
+     read every table (`pg_read_all_data`) and nothing else.
+5. Node meta and host volumes:
+   - control plane host: `meta { sanholo_control_plane = "true" }`, host
+     volumes `sanholo-deletion-log` (the directory of `DELETION_LOG_PATH`) and
+     `node-exporter-textfile`;
+   - tenant nodes: `meta { sanholo_tenants = "true" }` (as in section 2), host
+     volumes `sanholo-tenant-volumes` (the `host_volumes_dir`) and
+     `node-exporter-textfile`.
+6. The volume job reads the volume list through the Task API with its workload
+   identity. Attach a policy to it: `namespace "sanholo" { capabilities =
+   ["host-volume-read"] }`, applied with `nomad acl policy apply -namespace
+   sanholo-ops -job sanholo-backup-volumes ...`. Without it the backup still
+   runs and logs that `volumes.json` is missing.
+7. Run each job once (`nomad job periodic force`) and confirm
+   `sanholo_backup_last_success_timestamp_seconds` for `postgres`, `files` and
+   every tenant node's `volumes` in Prometheus.
+
+### How a failure is noticed
+
+Each run writes `sanholo_backup_last_attempt_ok{target}` and
+`..._last_attempt_timestamp_seconds{target}` to the node's textfile directory,
+and `..._last_success_timestamp_seconds{target}` on success only.
+`BackupFailed` fires on a failed run, `BackupStale` when a target's last
+success is older than 26 hours (the job did not run), `BackupMissing` when no
+database backup has ever reported.
+
+### Restore
+
+Order matters. **Deleted accounts must stay deleted** (section 8): the
+database restore is followed by `sanholo-cloud deletions reapply` **before the
+control plane takes traffic**, and tenant volumes are restored only after it.
+
+1. **qm, if it was lost.** Follow qm's own procedure; this repository does not
+   define it. What qm's `docs/OPERATIONS.md` (lhaig/qm) says applies: qm comes
+   up sealed and needs the Shamir unseal shares ("Initialize and unseal"); a
+   restored, older data directory is refused by anti-rollback until it is
+   re-anchored on purpose with `qm operator reanchor` ("Anti-rollback
+   enforcement"). The qm docs name no backup command yet: the qm session owns
+   that. A restored qm holds the game tokens of tenants deleted since its
+   backup; step 4 purges them again.
+2. **Keep the control plane stopped** (and the edge pointing elsewhere) until
+   step 5.
+3. **Database.** Into an empty database:
+
+   ```sh
+   restic snapshots --tag postgres                       # pick the snapshot
+   restic dump <snapshot> /<database>.dump > sanholo.dump
+   pg_restore --no-owner --no-privileges -d <database> sanholo.dump
+   ```
+
+   **Deletion log:** if the host that held `DELETION_LOG_PATH` was lost, put
+   the newest copy back. The job backs up the log's directory as
+   `/deletion-log`, so: `restic dump latest --tag files /deletion-log/<file
+   name> > "$DELETION_LOG_PATH"`. Never put an older log over a newer one.
+4. **Re-apply deletions** (section 8): `sanholo-cloud deletions reapply` with
+   the production environment, repeated until it reports no failure. It stops
+   and purges the jobs, deletes the volumes and purges qm for every account
+   deleted after the backup.
+5. **Start the control plane**, open `/admin`: no deletion listed as failed,
+   instances healthy. Let the edge send traffic again.
+6. **Tenant volumes**, for tenants the restored database still holds, when a
+   tenant node was lost (a running node keeps its volumes):
+   1. `restic snapshots --tag volumes --host <lost node>`, then
+      `restic restore <snapshot> --target /restore`. Files land in
+      `/restore/stage/volumes/<old volume id>/`; `volumes.json` next to them
+      maps each volume id to its name, `sanholo-tenant-<id>`.
+   2. In `/admin`, stop the tenant's instance, and delete its old volume record
+      (`nomad volume delete -type host -namespace sanholo <old id>`).
+   3. Create the volume again on a healthy tenant node with the control plane's
+      settings (name `sanholo-tenant-<id>`, plugin `mkdir`, `single-node-writer`
+      / `file-system`, parameters `mode=0750`, `uid=65532`, `gid=65532`;
+      section 2). The control plane reuses an existing volume of that name.
+   4. Copy the restored files into `<host_volumes_dir>/<new volume id>/` and
+      `chown -R 65532:65532` them.
+   5. Start the instance from `/admin`.
+
+### Restore drill (launch gate)
+
+Run on staging before the beta opens (US-022, `saas-launch-checklist.md`):
+restore qm per its procedure, then steps 2 to 6 above for the database, the
+deletion log and one tenant volume, with at least one account deleted after the
+backup was taken (it must stay deleted). Time it from "start of step 1" to
+"Bridge of the restored tenant shows its fleet".
+
+| Date | Who | qm | Database + reapply | Tenant volume | Total | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | |
+
+What was checked before hand-off: the image builds; `backup.sh` passes
+shellcheck and ran end to end against a local restic repository and
+PostgreSQL 17 (a missing repository fails and records `ok 0`; a failed
+`pg_dump` fails the run and keeps the last success time; the restored dump
+and the restored SQLite catalog read back their rows); `nomad fmt` and
+`nomad job validate`/`plan` on a Nomad 2.0.6 dev agent. Not exercised: Hetzner
+Object Storage, the host volumes and Task API on real nodes, and the
+workload-associated ACL policy.

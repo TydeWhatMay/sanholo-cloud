@@ -1,0 +1,117 @@
+# promtool test rules sanholo.rules.test.yml
+rule_files:
+  - sanholo.rules.yml
+evaluation_interval: 1m
+tests:
+  # Throttling: 5 in 10 minutes is quiet, 6 fires (US-023: "more than 5").
+  - interval: 1m
+    input_series:
+      - series: 'sanholo_api_throttled_total{job="sanholo-tenants",tenant="acme"}'
+        values: "0 0 1 1 2 2 3 3 4 4 5 5 5 5 5 5 5 5 5 5 5"
+      - series: 'sanholo_api_throttled_total{job="sanholo-tenants",tenant="bolt"}'
+        values: "0 0 1 1 2 2 3 3 4 4 6 6 6 6 6 6 6 6 6 6 6"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TenantThrottled
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: tenant-throttled, job: sanholo-tenants, tenant: bolt}
+            exp_annotations:
+              summary: "Tenant bolt was throttled by the game 6 times in 10 minutes."
+
+  # Crash loop: 3 restarts in 15 minutes fires, 2 does not.
+  - interval: 1m
+    input_series:
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-acme",tenant="acme",alloc_id="a1"}'
+        values: "0 0 1 1 2 2 3 3 3 3 3 3 3 3 3 3"
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-bolt",tenant="bolt",alloc_id="b1"}'
+        values: "0 0 1 1 2 2 2 2 2 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
+            exp_annotations:
+              summary: "Bot of tenant acme restarted 3 times in 15 minutes."
+
+  # qm: sealed fires after a minute; unreachable only when not sealed.
+  - interval: 1m
+    input_series:
+      - series: 'sanholo_cloud_qm_sealed{job="sanholo-cloud"}'
+        values: "1x10"
+      - series: 'sanholo_cloud_qm_up{job="sanholo-cloud"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: QMSealed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: QMSealed
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: qm-sealed, job: sanholo-cloud}
+            exp_annotations:
+              summary: "qm is sealed: bots cannot read their game tokens. Unseal per qm's procedure."
+      - eval_time: 10m
+        alertname: QMUnreachable
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'sanholo_cloud_qm_sealed{job="sanholo-cloud"}'
+        values: "0x10"
+      - series: 'sanholo_cloud_qm_up{job="sanholo-cloud"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: QMUnreachable
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: qm-unreachable, job: sanholo-cloud}
+            exp_annotations:
+              summary: "The control plane cannot reach qm (not sealed: network or process)."
+
+  # Backups: a failed run fires at once; a success older than 26h fires.
+  - interval: 1h
+    input_series:
+      - series: 'sanholo_backup_last_attempt_ok{instance="cp:9100",target="postgres"}'
+        values: "1 1 0"
+      - series: 'sanholo_backup_last_success_timestamp_seconds{instance="cp:9100",target="postgres"}'
+        values: "0x30"
+      - series: 'sanholo_backup_last_success_timestamp_seconds{instance="n1:9100",target="volumes"}'
+        values: "0+3600x30"
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: BackupFailed
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: BackupFailed
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: backup-failed, instance: "cp:9100", target: postgres}
+            exp_annotations:
+              summary: "The postgres backup on cp:9100 failed; see the job's logs."
+      - eval_time: 26h
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: backup-stale, instance: "cp:9100", target: postgres}
+            exp_annotations:
+              summary: "No successful postgres backup on cp:9100 for 1d 3h 0m 0s."
+
+  # Disk: exactly 80% is quiet, 81% for 15 minutes fires.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_size_bytes{instance="n1:9100",mountpoint="/",fstype="ext4"}'
+        values: "100x20"
+      - series: 'node_filesystem_avail_bytes{instance="n1:9100",mountpoint="/",fstype="ext4"}'
+        values: "19x20"
+      - series: 'node_filesystem_size_bytes{instance="n2:9100",mountpoint="/",fstype="ext4"}'
+        values: "100x20"
+      - series: 'node_filesystem_avail_bytes{instance="n2:9100",mountpoint="/",fstype="ext4"}'
+        values: "20x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: DiskAlmostFull
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: disk-full, instance: "n1:9100", mountpoint: "/", fstype: ext4}
+            exp_annotations:
+              summary: "Disk / on n1:9100 is 81% full."

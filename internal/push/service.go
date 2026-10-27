@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -167,6 +168,40 @@ type Service struct {
 
 	mu      sync.Mutex
 	windows map[string]*window
+
+	stats counters
+}
+
+// Stats are the delivery counters since start, for the metrics endpoint.
+// Every field only grows.
+type Stats struct {
+	// Delivered: messages a push service accepted (one per subscription).
+	Delivered uint64
+	// Gone: subscriptions the push service reported gone (removed).
+	Gone uint64
+	// Refused: messages refused for good (4xx other than 404/410/429).
+	Refused uint64
+	// GaveUp: messages dropped after MaxAttempts retries.
+	GaveUp uint64
+	// CapNotices: times a bucket hit HourlyCap and got the single notice.
+	CapNotices uint64
+	// CapDropped: alerts dropped because their bucket was over the cap.
+	CapDropped uint64
+	// QueueFull: alerts refused because the delivery queue had no room.
+	QueueFull uint64
+}
+
+type counters struct {
+	delivered, gone, refused, gaveUp, capNotices, capDropped, queueFull atomic.Uint64
+}
+
+// Stats returns the delivery counters.
+func (s *Service) Stats() Stats {
+	c := &s.stats
+	return Stats{
+		Delivered: c.delivered.Load(), Gone: c.gone.Load(), Refused: c.refused.Load(), GaveUp: c.gaveUp.Load(),
+		CapNotices: c.capNotices.Load(), CapDropped: c.capDropped.Load(), QueueFull: c.queueFull.Load(),
+	}
 }
 
 type window struct {
@@ -247,6 +282,7 @@ func (s *Service) enqueue(j job) error {
 		return nil
 	default:
 		s.wg.Done()
+		s.stats.queueFull.Add(1)
 		return ErrQueueFull
 	}
 }
@@ -307,8 +343,10 @@ func (s *Service) process(ctx context.Context, j job) {
 	a := j.alert
 	switch s.admit(bucket) {
 	case drop:
+		s.stats.capDropped.Add(1)
 		return
 	case notice:
+		s.stats.capNotices.Add(1)
 		a = Alert{Kind: "alert-cap", Severity: "warning", Text: CapNotice, Key: "alert-cap"}
 	}
 	for _, sub := range subs {
@@ -330,12 +368,15 @@ func (s *Service) deliver(ctx context.Context, sub stored, body []byte, attempt 
 	var re *RetryError
 	switch {
 	case err == nil:
+		s.stats.delivered.Add(1)
 	case errors.Is(err, ErrGone):
+		s.stats.gone.Add(1)
 		if rerr := s.cfg.Store.removeID(ctx, sub.ID); rerr != nil {
 			s.cfg.Logger.Error("push: remove dead subscription", "err", rerr)
 		}
 	case errors.As(err, &re):
 		if attempt >= s.cfg.MaxAttempts || ctx.Err() != nil {
+			s.stats.gaveUp.Add(1)
 			s.cfg.Logger.Warn("push: gave up after retries", "tenant", sub.TenantID, "attempts", attempt)
 			return
 		}
@@ -346,6 +387,7 @@ func (s *Service) deliver(ctx context.Context, sub stored, body []byte, attempt 
 			s.deliver(ctx, sub, body, attempt+1)
 		})
 	default:
+		s.stats.refused.Add(1)
 		s.cfg.Logger.Warn("push: delivery refused", "tenant", sub.TenantID)
 	}
 }

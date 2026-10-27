@@ -19,6 +19,8 @@ for them.
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL URL. If unset, built from `PGHOST`, `PGUSER`, `PGDATABASE` (required) and `PGPORT`, `PGPASSWORD`, `PGSSLMODE`. |
 | `LISTEN_ADDR` | Listen address. Default `127.0.0.1:8090`. |
+| `INTERNAL_LISTEN_ADDR` | The platform listener: a second address, on the private network, where Prometheus scrapes `GET /metrics` and Alertmanager posts `POST /internal/operator-alerts` (deploy/README.md, section 9). Must differ from `LISTEN_ADDR`; the edge never routes to it. Unset: both endpoints are off. Required when `APP_ENV=production`. |
+| `METRICS_TOKEN_FILE`, `ALERTMANAGER_TOKEN_FILE` | Files holding the bearer token Prometheus sends to `/metrics` and the one Alertmanager sends to `/internal/operator-alerts`: at least 32 characters, no inner white space, and different from each other. Read at start; a route whose token is not set does not exist. Both required when `APP_ENV=production`. Generate each with `openssl rand -base64 32`; secrets, delivered as files from qm. |
 | `BETA_INVITE_ONLY` | Default `true`. `false` is refused at start: open sign-up needs email verification, which is not built. |
 | `BETA_MAX_TENANTS` | Tenant cap. Default `20`. |
 | `BETA_MAX_GAME_ACCOUNTS_PER_TENANT` | Default `1`. Only `1` is supported: qm holds one game credential per tenant, and any other value is refused at start. |

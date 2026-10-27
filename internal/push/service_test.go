@@ -338,6 +338,11 @@ func TestHourlyCapBoundary(t *testing.T) {
 	if got := len(e.sender.to(ep)); got != 31 {
 		t.Fatalf("pushes while capped = %d, want 31", got)
 	}
+	// The counters say the same: 31 delivered (30 + the notice), one
+	// notice, six dropped over the cap.
+	if st := e.svc.Stats(); st.Delivered != 31 || st.CapNotices != 1 || st.CapDropped != 6 {
+		t.Fatalf("stats while capped = %+v", st)
+	}
 	// One second before the hour: still silent.
 	e.advance(time.Hour - time.Second)
 	submit(1)
@@ -403,11 +408,16 @@ func TestGoneSubscriptionIsDeleted(t *testing.T) {
 		t.Fatalf("remaining = %s", left)
 	}
 	// A refusal that is not gone/retryable keeps the row.
-	e.sender.answer = map[string][]error{live: {fmt.Errorf("%w: HTTP 403", push.ErrPermanent)}}
+	// Answers are indexed by call: live's first call (above) succeeded, its
+	// second gets the 403.
+	e.sender.answer = map[string][]error{live: {nil, fmt.Errorf("%w: HTTP 403", push.ErrPermanent)}}
 	_ = e.svc.Submit("acme", alert("test", "y"))
 	e.svc.Wait()
 	if n, _ := e.st.Count(context.Background(), "acme"); n != 1 {
 		t.Fatal("a 403 deleted the subscription")
+	}
+	if st := e.svc.Stats(); st.Gone != 1 || st.Refused != 1 || st.Delivered != 1 {
+		t.Fatalf("stats = %+v, want gone 1, refused 1, delivered 1", st)
 	}
 }
 
@@ -455,6 +465,9 @@ func TestRetriesBackOffAndStop(t *testing.T) {
 	if n, _ := e.st.Count(context.Background(), "acme"); n != 1 {
 		t.Fatal("a 429/5xx deleted the subscription")
 	}
+	if st := e.svc.Stats(); st.GaveUp != 1 || st.Delivered != 0 {
+		t.Fatalf("stats = %+v, want gave up 1", st)
+	}
 }
 
 func TestNotifyOperatorReachesOnlyOperatorTenants(t *testing.T) {
@@ -501,6 +514,9 @@ func TestQueueIsBoundedAndSubmitNeverBlocks(t *testing.T) {
 	case err := <-done:
 		if !errors.Is(err, push.ErrQueueFull) {
 			t.Fatalf("err = %v", err)
+		}
+		if st := svc.Stats(); st.QueueFull != 1 {
+			t.Fatalf("QueueFull = %d, want 1", st.QueueFull)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Submit blocked on a full queue")
