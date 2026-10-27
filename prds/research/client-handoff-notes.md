@@ -17,7 +17,8 @@ requirement or open point the control plane must cover.
   control plane verifies it against Nomad's JWKS and takes the tenant from the
   verified job id `sanholo-tenant-<id>`; `X-SanHolo-Tenant` is informational
   only. The tenant job spec needs a second `identity` block:
-  `aud = ["sanholo.cloud"]`, `file = true`, name `sanholo.cloud`.
+  `aud = ["sanholo.cloud"]`, `file = true`, name `sanholo_cloud` (Nomad
+  identity names allow no dots; the qm identity is `qm_sanholo`, aud `qm.sanholo`).
 - Nomad `kill_timeout` must be raised from the default 5 s to 20 s: the
   instance drains its engine and closes cleanly within that.
 - Push subscriptions: the Bridge POSTs the browser's subscription to
@@ -38,7 +39,7 @@ requirement or open point the control plane must cover.
   grace / `check_restart` so a restart only follows a sustained 503 (startup
   itself is about 1 s; warm-up can take minutes under the game's rate limit).
 - Credentials: tenant from `NOMAD_JOB_ID` = `sanholo-tenant-<id>`; identity
-  file `${NOMAD_SECRETS_DIR}/nomad_qm.sanholo.jwt`; qm wire shapes live in the
+  file `${NOMAD_SECRETS_DIR}/nomad_qm_sanholo.jwt`; qm wire shapes live in the
   client's `internal/qmcreds/wire.go` until qm's integration contract lands.
 - A second replicant created from the Bridge: its vessel is not reserved
   automatically; the README tells the player to reserve it.
