@@ -142,6 +142,7 @@ func TestLoadHostedSettings(t *testing.T) {
 		m := map[string]string{
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw",
 			"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8",
+			"QM_ADDR": "https://qm.sanholo.space", "QM_TOKEN_FILE": "/run/secrets/qm-token",
 		}
 		if key != "" {
 			m[key] = val
@@ -191,7 +192,7 @@ func TestLoadHostedSettings(t *testing.T) {
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_PORT": "465",
 			"SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw", "SMTP_FROM": "SanHolo <no-reply@sanholo.space>",
 			"APP_BASE_URL": "https://app.sanholo.space", "WEBAUTHN_RP_ID": "app.sanholo.space",
-			"TRUSTED_PROXIES": "10.0.0.0/8",
+			"TRUSTED_PROXIES": "10.0.0.0/8", "QM_ADDR": "https://qm.sanholo.space", "QM_TOKEN": "t",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)
@@ -201,7 +202,28 @@ func TestLoadHostedSettings(t *testing.T) {
 		{"production needs explicit base url", with(prodEnv("APP_BASE_URL", "")), "APP_BASE_URL", nil},
 		{"production refuses http base url", with(prodEnv("APP_BASE_URL", "http://localhost:8090")), "APP_BASE_URL", nil},
 		{"production needs smtp username", with(prodEnv("SMTP_USERNAME", "")), "SMTP_USERNAME", nil},
-		{"production complete", with(prodEnv("", "")), "", nil},
+		{"production complete", with(prodEnv("", "")), "", func(t *testing.T, c Config) {
+			if c.QM != (QM{Addr: "https://qm.sanholo.space", TokenFile: "/run/secrets/qm-token"}) {
+				t.Errorf("QM = %+v", c.QM)
+			}
+		}},
+		{"production needs qm", with(prodEnv("QM_ADDR", "")), "QM_ADDR", nil},
+		{"production refuses http qm", with(prodEnv("QM_ADDR", "http://qm.sanholo.space")), "QM_ADDR", nil},
+		{"qm disabled in development", with(nil), "", func(t *testing.T, c Config) {
+			if c.QM != (QM{}) {
+				t.Errorf("QM = %+v", c.QM)
+			}
+		}},
+		{"qm http loopback in development", with(map[string]string{"QM_ADDR": "http://127.0.0.1:8222/", "QM_TOKEN": "t"}), "", func(t *testing.T, c Config) {
+			if c.QM.Addr != "http://127.0.0.1:8222" || c.QM.Token != "t" {
+				t.Errorf("QM = %+v", c.QM)
+			}
+		}},
+		{"qm http real host refused", with(map[string]string{"QM_ADDR": "http://qm.example.org", "QM_TOKEN": "t"}), "QM_ADDR", nil},
+		{"qm addr needs a token", with(map[string]string{"QM_ADDR": "https://qm.example.org"}), "QM_TOKEN", nil},
+		{"qm token and file both", with(map[string]string{"QM_ADDR": "https://qm.example.org", "QM_TOKEN": "t", "QM_TOKEN_FILE": "/x"}), "exactly one", nil},
+		{"qm token without addr", with(map[string]string{"QM_TOKEN": "t"}), "QM_ADDR", nil},
+		{"qm token file without addr", with(map[string]string{"QM_TOKEN_FILE": "/x"}), "QM_ADDR", nil},
 		{"username needs password", with(map[string]string{"SMTP_HOST": "h", "SMTP_USERNAME": "u"}), "SMTP_PASSWORD", nil},
 		{"bad port", with(map[string]string{"SMTP_HOST": "h", "SMTP_PORT": "x"}), "SMTP_PORT", nil},
 		{"line break in from", with(map[string]string{"SMTP_HOST": "h", "SMTP_FROM": "a@b.c\r\nBcc: x@y.z"}), "SMTP_FROM", nil},

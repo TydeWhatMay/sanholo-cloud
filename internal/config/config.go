@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/lhaig/sanholo-cloud/internal/secrets"
 )
 
 // Config is the validated process configuration.
@@ -28,6 +30,9 @@ type Config struct {
 	// TrustedProxies are the peers whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
 	SMTP           SMTP
+	// QM is the control plane's route to tenant secrets. Empty Addr means
+	// secrets are disabled (development only; production requires it).
+	QM QM
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
@@ -45,6 +50,15 @@ type SMTP struct {
 	Username string
 	Password string
 	From     string
+}
+
+// QM holds the qm connection. Token is a secret: never log or print a
+// Config. At most one of Token and TokenFile is set; TokenFile is re-read
+// on every request.
+type QM struct {
+	Addr      string
+	Token     string
+	TokenFile string
 }
 
 // WebAuthn is the relying party for passkeys. RPID is the registrable domain
@@ -156,6 +170,11 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("SMTP_USERNAME is set but SMTP_PASSWORD is not"))
 		}
 	}
+	qm, err := qmSettings(getenv)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.QM = qm
 	wa, err := webAuthn(getenv, c.AppBaseURL)
 	if err != nil {
 		errs = append(errs, err)
@@ -172,10 +191,34 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("SMTP_USERNAME is required when APP_ENV=production: mail must be authenticated"))
 		}
 	}
+	if c.Production && c.QM.Addr == "" {
+		errs = append(errs, errors.New("QM_ADDR is required when APP_ENV=production: customer game tokens are stored in qm"))
+	}
 	if c.Production && !wa.Enabled() {
 		errs = append(errs, errors.New("WEBAUTHN_RP_ID is required when APP_ENV=production: operators sign in with a passkey"))
 	}
 	return c, errors.Join(errs...)
+}
+
+// qmSettings reads QM_ADDR, QM_TOKEN and QM_TOKEN_FILE. With none set,
+// secrets are disabled. Errors never include the token.
+func qmSettings(getenv func(string) string) (QM, error) {
+	q := QM{Addr: getenv("QM_ADDR"), Token: getenv("QM_TOKEN"), TokenFile: getenv("QM_TOKEN_FILE")}
+	if q.Addr == "" {
+		if q.Token != "" || q.TokenFile != "" {
+			return QM{}, errors.New("QM_TOKEN or QM_TOKEN_FILE is set but QM_ADDR is not")
+		}
+		return q, nil
+	}
+	addr, err := secrets.ParseAddr(q.Addr)
+	if err != nil {
+		return QM{}, fmt.Errorf("QM_ADDR: %w", err)
+	}
+	q.Addr = addr
+	if (q.Token == "") == (q.TokenFile == "") {
+		return QM{}, errors.New("QM_ADDR is set: set exactly one of QM_TOKEN and QM_TOKEN_FILE")
+	}
+	return q, nil
 }
 
 // webAuthn reads WEBAUTHN_RP_ID, WEBAUTHN_RP_ORIGIN and WEBAUTHN_RP_NAME.

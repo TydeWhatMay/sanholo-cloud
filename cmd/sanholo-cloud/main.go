@@ -17,6 +17,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/config"
 	"github.com/lhaig/sanholo-cloud/internal/db"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
+	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 )
 
@@ -43,6 +44,22 @@ func main() {
 	if err := db.Migrate(ctx, pool); err != nil {
 		log.Fatal(err)
 	}
+
+	// The secrets client is built here so a bad qm address or token file
+	// stops the service at start. Nothing uses it until game accounts are
+	// connected (task 2.2).
+	sec, err := secrets.New(secrets.Config{Addr: cfg.QM.Addr, Token: cfg.QM.Token, TokenFile: cfg.QM.TokenFile})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if sec.Enabled() {
+		if err := sec.Ready(ctx); err != nil {
+			log.Printf("secrets: qm not ready at start: %v", err)
+		}
+	} else {
+		log.Print("secrets: QM_ADDR not set; storing game tokens is disabled")
+	}
+	_ = sec
 
 	var wa *webauthn.WebAuthn
 	if cfg.WebAuthn.Enabled() {

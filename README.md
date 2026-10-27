@@ -29,6 +29,8 @@ for them.
 | `SMTP_PORT` | Default `587` (STARTTLS). `465` is implicit TLS. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | When the username is set, STARTTLS and AUTH are mandatory; the service refuses to send without them. The password comes from qm and is never logged. |
 | `SMTP_FROM` | Sender. Default `no-reply@<SMTP_HOST>`. |
+| `QM_ADDR` | Origin of the dedicated qm that holds customer game tokens: `https`, or `http` on a loopback host. Unset in development: secrets are disabled (the service starts; operations return `ErrSecretsUnavailable`). Required when `APP_ENV=production`. |
+| `QM_TOKEN`, `QM_TOKEN_FILE` | The control plane's own qm client token, directly or as a file path (re-read on every request, so renewal needs no restart). Exactly one when `QM_ADDR` is set. The principal is write-only; the token is never logged. |
 | `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
 | `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
 | `WEBAUTHN_RP_NAME` | Name shown by the authenticator. Default `SanHolo`. |
@@ -99,6 +101,16 @@ transaction as the change. An invite code is sent by email only; the database
 keeps its hash and no admin page shows it. A suspended tenant keeps its place
 in the beta cap. The database holds no game token; a test fails if any
 column named for a token, secret or password is not a `*_hash`.
+
+### Tenant secrets
+
+`internal/secrets` is the only route to tenant secrets in qm. It can store
+a tenant's game credentials (`Put`), list names (`List`) and destroy
+(`PurgeTenant`, `Rotate`); it has no method that returns a value, and
+`TestAPISurface` fails if one is added. Deletion goes only through
+`PurgeTenant` and `Rotate`. Every wire detail is in `secrets/wire.go`
+(provisional until qm's integration contract lands); `secrets/qmfake` is the
+in-memory qm the tests use.
 
 ### The gate
 
