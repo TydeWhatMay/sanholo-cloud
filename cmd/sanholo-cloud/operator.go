@@ -55,6 +55,9 @@ func operatorCmd(ctx context.Context, svc *admin.Service, args []string, out io.
 	if errors.Is(err, admin.ErrNotFound) {
 		return fmt.Errorf("no account has the address %s", args[1])
 	}
+	if errors.Is(err, admin.ErrNoPasskey) {
+		return fmt.Errorf("%s has no passkey: sign in with an email link, add a passkey on the account page, then grant again", args[1])
+	}
 	if err != nil {
 		return err
 	}

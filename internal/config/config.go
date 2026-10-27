@@ -31,7 +31,9 @@ type Config struct {
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
-	// Production is APP_ENV=production: mail must be configured.
+	// Production is APP_ENV=production: mail, an https base URL and trusted
+	// proxies must be configured (the default base URL is http, so an unset
+	// APP_BASE_URL is refused too).
 	Production bool
 }
 
@@ -159,6 +161,17 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, err)
 	}
 	c.WebAuthn = wa
+	if c.Production {
+		if len(c.TrustedProxies) == 0 {
+			errs = append(errs, errors.New("TRUSTED_PROXIES is required when APP_ENV=production: without it every client shares the edge's rate-limit key"))
+		}
+		if !strings.HasPrefix(c.AppBaseURL, "https://") {
+			errs = append(errs, errors.New("APP_BASE_URL must be set to an https origin when APP_ENV=production"))
+		}
+		if c.SMTP.Host != "" && c.SMTP.Username == "" {
+			errs = append(errs, errors.New("SMTP_USERNAME is required when APP_ENV=production: mail must be authenticated"))
+		}
+	}
 	if c.Production && !wa.Enabled() {
 		errs = append(errs, errors.New("WEBAUTHN_RP_ID is required when APP_ENV=production: operators sign in with a passkey"))
 	}

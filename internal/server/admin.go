@@ -133,6 +133,8 @@ func (a *App) adminError(c *fiber.Ctx, err error) error {
 		return a.message(c, fiber.StatusNotFound, "Not found", "No such tenant, address or invite.")
 	case errors.Is(err, admin.ErrState):
 		return a.message(c, fiber.StatusConflict, "No change made", "The tenant is not in a state where this applies.")
+	case errors.Is(err, admin.ErrOwnTenant):
+		return a.message(c, fiber.StatusConflict, "No change made", "You cannot suspend your own tenant.")
 	case errors.Is(err, auth.ErrAccountExists):
 		return a.message(c, fiber.StatusConflict, "No change made", "An account already exists for this address.")
 	case isInputError(err):

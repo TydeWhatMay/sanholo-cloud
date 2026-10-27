@@ -20,13 +20,26 @@ func TestOperatorCommand(t *testing.T) {
 	if _, err := a.Redeem(ctx, code); err != nil {
 		t.Fatal(err)
 	}
+	var out bytes.Buffer
+	// No passkey yet: the grant is refused and says what to do.
+	err := operatorCmd(ctx, svc, []string{"grant", "op@example.org"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "passkey") {
+		t.Fatalf("grant without a passkey: %v", err)
+	}
+	var on bool
+	_ = pool.QueryRow(ctx, `SELECT is_operator FROM accounts`).Scan(&on)
+	if on {
+		t.Fatal("a refused grant set the flag")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO passkeys (id, account_id, credential) SELECT 'k', id, '{}' FROM accounts`); err != nil {
+		t.Fatal(err)
+	}
 	flag := func() bool {
 		var on bool
 		_ = pool.QueryRow(ctx, `SELECT is_operator FROM accounts`).Scan(&on)
 		return on
 	}
 
-	var out bytes.Buffer
 	if err := operatorCmd(ctx, svc, []string{"grant", "op@example.org"}, &out); err != nil || !flag() {
 		t.Fatalf("grant: %v, flag %v", err, flag())
 	}

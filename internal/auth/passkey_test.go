@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func accountID(t *testing.T, pool *pgxpool.Pool, email string) string {
 func register(t *testing.T, s *Service, acct string) *webauthntest.Authenticator {
 	t.Helper()
 	ctx := context.Background()
-	opts, secret, err := s.BeginPasskeyRegistration(ctx, acct)
+	opts, secret, err := s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func register(t *testing.T, s *Service, acct string) *webauthntest.Authenticator
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); err != nil {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); err != nil {
 		t.Fatalf("finish registration: %v", err)
 	}
 	return au
@@ -76,7 +77,7 @@ func TestPasskeyRegisterAndList(t *testing.T) {
 func TestPasskeysDisabled(t *testing.T) {
 	s, pool := newSvc(t, Options{})
 	newAccount(t, s, "a@example.org")
-	_, _, err := s.BeginPasskeyRegistration(context.Background(), accountID(t, pool, "a@example.org"))
+	_, _, err := s.BeginPasskeyRegistration(context.Background(), accountID(t, pool, "a@example.org"), MethodPasskey)
 	if !errors.Is(err, ErrPasskeysDisabled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -91,24 +92,24 @@ func TestPasskeyChallengeIsSingleUse(t *testing.T) {
 	acct := accountID(t, pool, "a@example.org")
 	ctx := context.Background()
 
-	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct)
+	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
 	body, _ := webauthntest.New(testRPID, testRPOrigin).Create(opts)
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); err != nil {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); err != nil {
 		t.Fatal(err)
 	}
 	// The same challenge and the same valid response, replayed.
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("replay err = %v, want ErrPasskeyChallenge", err)
 	}
 
 	// A failed attempt spends the challenge too: garbage first, then the
 	// valid answer to the same challenge is refused.
-	opts, secret, _ = s.BeginPasskeyRegistration(ctx, acct)
+	opts, secret, _ = s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
 	body, _ = webauthntest.New(testRPID, testRPOrigin).Create(opts)
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, []byte(`{}`)); err == nil {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, []byte(`{}`)); err == nil {
 		t.Fatal("garbage accepted")
 	}
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("after failed attempt err = %v, want ErrPasskeyChallenge", err)
 	}
 
@@ -132,19 +133,19 @@ func TestPasskeyChallengeExpires(t *testing.T) {
 	now := time.Now()
 	s.SetClock(func() time.Time { return now })
 
-	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct)
+	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
 	body, _ := webauthntest.New(testRPID, testRPOrigin).Create(opts)
 	now = now.Add(ChallengeTTL + time.Second)
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("expired err = %v, want ErrPasskeyChallenge", err)
 	}
 
 	// One second inside the window still works.
 	now = time.Now()
-	opts, secret, _ = s.BeginPasskeyRegistration(ctx, acct)
+	opts, secret, _ = s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
 	body, _ = webauthntest.New(testRPID, testRPOrigin).Create(opts)
 	now = now.Add(ChallengeTTL - time.Second)
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); err != nil {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); err != nil {
 		t.Fatalf("inside window: %v", err)
 	}
 }
@@ -156,7 +157,7 @@ func TestPasskeyChallengeBinding(t *testing.T) {
 	a, b := accountID(t, pool, "a@example.org"), accountID(t, pool, "b@example.org")
 	ctx := context.Background()
 
-	opts, secret, _ := s.BeginPasskeyRegistration(ctx, a)
+	opts, secret, _ := s.BeginPasskeyRegistration(ctx, a, MethodPasskey)
 	body, _ := webauthntest.New(testRPID, testRPOrigin).Create(opts)
 
 	cases := []struct {
@@ -169,28 +170,28 @@ func TestPasskeyChallengeBinding(t *testing.T) {
 		{"another account", b, secret},
 	}
 	for _, tc := range cases {
-		if _, err := s.FinishPasskeyRegistration(ctx, tc.account, tc.secret, body); !errors.Is(err, ErrPasskeyChallenge) {
+		if _, err := s.FinishPasskeyRegistration(ctx, tc.account, MethodPasskey, tc.secret, body); !errors.Is(err, ErrPasskeyChallenge) {
 			t.Errorf("%s: err = %v, want ErrPasskeyChallenge", tc.name, err)
 		}
 	}
 	// None of the refusals spent the challenge: the owner can still finish.
-	if _, err := s.FinishPasskeyRegistration(ctx, a, secret, body); err != nil {
+	if _, err := s.FinishPasskeyRegistration(ctx, a, MethodPasskey, secret, body); err != nil {
 		t.Fatalf("owner after refusals: %v", err)
 	}
 
 	// A sign-in challenge cannot complete a registration, nor the reverse.
 	lopts, lsecret, _ := s.BeginPasskeyLogin(ctx)
 	rbody, _ := webauthntest.New(testRPID, testRPOrigin).Create(lopts)
-	if _, err := s.FinishPasskeyRegistration(ctx, a, lsecret, rbody); !errors.Is(err, ErrPasskeyChallenge) {
+	if _, err := s.FinishPasskeyRegistration(ctx, a, MethodPasskey, lsecret, rbody); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Errorf("login challenge used for registration: %v", err)
 	}
-	opts, secret, _ = s.BeginPasskeyRegistration(ctx, a)
+	opts, secret, _ = s.BeginPasskeyRegistration(ctx, a, MethodPasskey)
 	au := webauthntest.New(testRPID, testRPOrigin)
 	reg, _ := au.Create(opts)
-	if _, err := s.FinishPasskeyRegistration(ctx, a, secret, reg); err != nil {
+	if _, err := s.FinishPasskeyRegistration(ctx, a, MethodPasskey, secret, reg); err != nil {
 		t.Fatal(err)
 	}
-	opts, secret, _ = s.BeginPasskeyRegistration(ctx, a)
+	opts, secret, _ = s.BeginPasskeyRegistration(ctx, a, MethodPasskey)
 	assertion, _ := au.Get(opts)
 	if _, _, err := s.FinishPasskeyLogin(ctx, secret, assertion, "ua"); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Errorf("registration challenge used for sign-in: %v", err)
@@ -347,12 +348,249 @@ func TestPasskeyChallengeKindIsChecked(t *testing.T) {
 	newAccount(t, s, "a@example.org")
 	acct := accountID(t, pool, "a@example.org")
 	ctx := context.Background()
-	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct)
+	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
 	body, _ := webauthntest.New(testRPID, testRPOrigin).Create(opts)
 	if _, err := pool.Exec(ctx, `UPDATE webauthn_challenges SET kind = 'login'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.FinishPasskeyRegistration(ctx, acct, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("err = %v, want ErrPasskeyChallenge", err)
+	}
+}
+
+// begin and finish a registration for a session opened with method, using
+// au, and return the finish error.
+func registerVia(t *testing.T, s *Service, acct, method string, au *webauthntest.Authenticator) error {
+	t.Helper()
+	ctx := context.Background()
+	opts, secret, err := s.BeginPasskeyRegistration(ctx, acct, MethodPasskey) // begin is not under test here
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := au.Create(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.FinishPasskeyRegistration(ctx, acct, method, secret, body)
+	return err
+}
+
+func TestPasskeyRegistrationStepUp(t *testing.T) {
+	s, pool := newPasskeySvc(t)
+	ctx := context.Background()
+	newAccount(t, s, "plain@example.org")
+	newAccount(t, s, "op@example.org")
+	plain, op := accountID(t, pool, "plain@example.org"), accountID(t, pool, "op@example.org")
+	if _, err := pool.Exec(ctx, `UPDATE accounts SET is_operator = true WHERE id = $1`, op); err != nil {
+		t.Fatal(err)
+	}
+	newAU := func() *webauthntest.Authenticator { return webauthntest.New(testRPID, testRPOrigin) }
+
+	// A link session may add the first passkey of an ordinary account.
+	if err := registerVia(t, s, plain, MethodMagicLink, newAU()); err != nil {
+		t.Fatalf("first passkey from a link session: %v", err)
+	}
+	// ... but not a second one, at begin or at finish.
+	if _, _, err := s.BeginPasskeyRegistration(ctx, plain, MethodMagicLink); !errors.Is(err, ErrPasskeyStepUp) {
+		t.Fatalf("begin, second passkey from a link: %v", err)
+	}
+	if err := registerVia(t, s, plain, MethodMagicLink, newAU()); !errors.Is(err, ErrPasskeyStepUp) {
+		t.Fatalf("finish, second passkey from a link: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM passkeys WHERE account_id = $1`, plain); n != 1 {
+		t.Fatalf("passkeys = %d, want 1", n)
+	}
+	// A passkey session may.
+	if err := registerVia(t, s, plain, MethodPasskey, newAU()); err != nil {
+		t.Fatalf("second passkey from a passkey session: %v", err)
+	}
+
+	// An operator needs a passkey session even for the first one.
+	if _, _, err := s.BeginPasskeyRegistration(ctx, op, MethodMagicLink); !errors.Is(err, ErrPasskeyStepUp) {
+		t.Fatalf("begin, operator from a link: %v", err)
+	}
+	if err := registerVia(t, s, op, MethodMagicLink, newAU()); !errors.Is(err, ErrPasskeyStepUp) {
+		t.Fatalf("finish, operator from a link: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM passkeys WHERE account_id = $1`, op); n != 0 {
+		t.Fatalf("operator passkeys = %d, want 0", n)
+	}
+}
+
+func TestPasskeyRegistrationEmailsTheAccountInTheSameTransaction(t *testing.T) {
+	s, pool := newPasskeySvc(t)
+	ctx := context.Background()
+	newAccount(t, s, "a@example.org")
+	acct := accountID(t, pool, "a@example.org")
+	before := len(outbox(t, pool))
+	register(t, s, acct)
+	msgs := outbox(t, pool)
+	if len(msgs) != before+1 {
+		t.Fatalf("outbox grew by %d, want 1", len(msgs)-before)
+	}
+	m := msgs[len(msgs)-1]
+	today := time.Now().UTC().Format("2006-01-02")
+	if m.To != "a@example.org" || !strings.Contains(m.Subject, "passkey was added") ||
+		!strings.Contains(m.Body, today) || !strings.Contains(m.Body, "If you did not") {
+		t.Fatalf("message = %+v", m)
+	}
+
+	// If the email cannot be queued the passkey is not stored either.
+	for _, q := range []string{
+		`CREATE FUNCTION mail_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'mail refused'; END $$`,
+		`CREATE TRIGGER mail_boom BEFORE INSERT ON mail_outbox FOR EACH ROW EXECUTE FUNCTION mail_boom()`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts, secret, _ := s.BeginPasskeyRegistration(ctx, acct, MethodPasskey)
+	body, _ := webauthntest.New(testRPID, testRPOrigin).Create(opts)
+	if _, err := s.FinishPasskeyRegistration(ctx, acct, MethodPasskey, secret, body); err == nil {
+		t.Fatal("registration succeeded without its email")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM passkeys`); n != 1 {
+		t.Fatalf("passkeys = %d, want the 1 from before", n)
+	}
+}
+
+func TestDeletingAPasskeyEndsPasskeySessionsOnly(t *testing.T) {
+	s, pool := newPasskeySvc(t)
+	ctx := context.Background()
+	newAccount(t, s, "a@example.org")
+	newAccount(t, s, "b@example.org")
+	a, b := accountID(t, pool, "a@example.org"), accountID(t, pool, "b@example.org")
+	au, bu := register(t, s, a), register(t, s, b)
+
+	login := func(au *webauthntest.Authenticator) string {
+		opts, secret, _ := s.BeginPasskeyLogin(ctx)
+		body, _ := au.Get(opts)
+		sec, _, err := s.FinishPasskeyLogin(ctx, secret, body, "ua")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sec
+	}
+	linkSession := func(acct string) string {
+		tok := NewSecret()
+		if _, err := pool.Exec(ctx, `INSERT INTO magic_links (token_hash, account_id, expires_at) VALUES ($1, $2, now() + interval '1 minute')`, HashSecret(tok), acct); err != nil {
+			t.Fatal(err)
+		}
+		sec, _, err := s.ConsumeMagicLink(ctx, tok, "ua")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sec
+	}
+	aPass, aLink, bPass := login(au), linkSession(a), login(bu)
+
+	// A foreign or malformed delete ends nothing.
+	if ok, _ := s.DeletePasskey(ctx, b, base64.RawURLEncoding.EncodeToString(au.ID)); ok {
+		t.Fatal("foreign delete worked")
+	}
+	for name, sec := range map[string]string{"a passkey": aPass, "a link": aLink, "b passkey": bPass} {
+		if _, err := s.LookupSession(ctx, sec); err != nil {
+			t.Fatalf("session of %s ended by a refused delete: %v", name, err)
+		}
+	}
+
+	if ok, err := s.DeletePasskey(ctx, a, base64.RawURLEncoding.EncodeToString(au.ID)); err != nil || !ok {
+		t.Fatalf("delete: %v %v", ok, err)
+	}
+	if _, err := s.LookupSession(ctx, aPass); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("passkey session survived the delete: %v", err)
+	}
+	if _, err := s.LookupSession(ctx, aLink); err != nil {
+		t.Fatalf("link session ended: %v", err)
+	}
+	if _, err := s.LookupSession(ctx, bPass); err != nil {
+		t.Fatalf("another account's session ended: %v", err)
+	}
+}
+
+func TestPasskeyRequiresUserVerification(t *testing.T) {
+	s, pool := newPasskeySvc(t)
+	ctx := context.Background()
+	newAccount(t, s, "a@example.org")
+	acct := accountID(t, pool, "a@example.org")
+
+	// Registration without UV is refused and stores nothing.
+	noUV := webauthntest.New(testRPID, testRPOrigin)
+	noUV.NoUV = true
+	if err := registerVia(t, s, acct, MethodPasskey, noUV); !errors.Is(err, ErrPasskeyFailed) {
+		t.Fatalf("registration without UV: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM passkeys`); n != 0 {
+		t.Fatalf("passkeys = %d", n)
+	}
+
+	// Sign-in without UV is refused for a credential that was registered
+	// with it: the same key, the flag dropped.
+	au := register(t, s, acct)
+	au.NoUV = true
+	opts, secret, _ := s.BeginPasskeyLogin(ctx)
+	body, _ := au.Get(opts)
+	if _, _, err := s.FinishPasskeyLogin(ctx, secret, body, "ua"); !errors.Is(err, ErrPasskeyFailed) {
+		t.Fatalf("sign-in without UV: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM account_sessions`); n != 0 {
+		t.Fatalf("sessions = %d", n)
+	}
+	// The same key with UV signs in, so the refusal was the flag.
+	au.NoUV = false
+	opts, secret, _ = s.BeginPasskeyLogin(ctx)
+	body, _ = au.Get(opts)
+	if _, _, err := s.FinishPasskeyLogin(ctx, secret, body, "ua"); err != nil {
+		t.Fatalf("sign-in with UV: %v", err)
+	}
+}
+
+func TestPasskeyRefusesAWrongOrigin(t *testing.T) {
+	s, pool := newPasskeySvc(t)
+	ctx := context.Background()
+	newAccount(t, s, "a@example.org")
+	acct := accountID(t, pool, "a@example.org")
+
+	phish := webauthntest.New(testRPID, "http://localhost.evil.example")
+	if err := registerVia(t, s, acct, MethodPasskey, phish); !errors.Is(err, ErrPasskeyFailed) {
+		t.Fatalf("registration from the wrong origin: %v", err)
+	}
+	au := register(t, s, acct)
+	au.Origin = "http://localhost.evil.example"
+	opts, secret, _ := s.BeginPasskeyLogin(ctx)
+	body, _ := au.Get(opts)
+	if _, _, err := s.FinishPasskeyLogin(ctx, secret, body, "ua"); !errors.Is(err, ErrPasskeyFailed) {
+		t.Fatalf("sign-in from the wrong origin: %v", err)
+	}
+	au.Origin = testRPOrigin
+	opts, secret, _ = s.BeginPasskeyLogin(ctx)
+	body, _ = au.Get(opts)
+	if _, _, err := s.FinishPasskeyLogin(ctx, secret, body, "ua"); err != nil {
+		t.Fatalf("sign-in from the right origin: %v", err)
+	}
+}
+
+// Two logins that present the same counter both pass the library's clone
+// check, which reads the stored value before either writes. The write is a
+// compare-and-set, so only one wins. The hook stands in for the winner.
+func TestPasskeyCounterUpdateIsCompareAndSet(t *testing.T) {
+	s, pool := newPasskeySvc(t)
+	ctx := context.Background()
+	newAccount(t, s, "a@example.org")
+	acct := accountID(t, pool, "a@example.org")
+	au := register(t, s, acct)
+
+	opts, secret, _ := s.BeginPasskeyLogin(ctx)
+	body, _ := au.Get(opts) // presents counter 1
+	s.beforeCounterUpdate = func() {
+		if _, err := pool.Exec(ctx, `UPDATE passkeys SET sign_count = 1`); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, _, err := s.FinishPasskeyLogin(ctx, secret, body, "ua"); !errors.Is(err, ErrPasskeyFailed) {
+		t.Fatalf("racing login: %v, want ErrPasskeyFailed", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM account_sessions`); n != 0 {
+		t.Fatalf("sessions = %d, want none", n)
 	}
 }

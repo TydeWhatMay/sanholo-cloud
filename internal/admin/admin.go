@@ -27,6 +27,12 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrState means the change does not apply to the current state.
 	ErrState = errors.New("not applicable in the current state")
+	// ErrNoPasskey means the account has no passkey, so it cannot be made an
+	// operator: /admin accepts passkey sessions only.
+	ErrNoPasskey = errors.New("the account has no passkey")
+	// ErrOwnTenant means an operator tried to suspend their own tenant,
+	// which would lock them out of /admin.
+	ErrOwnTenant = errors.New("an operator cannot suspend their own tenant")
 )
 
 // Service is the admin operations over one PostgreSQL pool.
@@ -75,7 +81,9 @@ func (s *Service) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 }
 
 // SetOperator grants or revokes operator rights for the account with this
-// address. It is reachable only from the command line.
+// address. It is reachable only from the command line. Granting needs the
+// account to hold a passkey already (ErrNoPasskey): the account signs in by
+// link, adds a passkey, and only then is made an operator.
 func (s *Service) SetOperator(ctx context.Context, actor, email string, on bool) error {
 	email, err := auth.ValidateEmail(email)
 	if err != nil {
@@ -87,13 +95,20 @@ func (s *Service) SetOperator(ctx context.Context, actor, email string, on bool)
 	}
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		var id string
-		err := tx.QueryRow(ctx,
-			`UPDATE accounts SET is_operator = $2 WHERE email_hash = $1 RETURNING id::text`,
-			auth.HashEmail(email), on).Scan(&id)
+		var hasPasskey bool
+		err := tx.QueryRow(ctx, `
+			SELECT id::text, EXISTS (SELECT 1 FROM passkeys WHERE account_id = accounts.id)
+			FROM accounts WHERE email_hash = $1 FOR UPDATE`, auth.HashEmail(email)).Scan(&id, &hasPasskey)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
+			return fmt.Errorf("admin: set operator: %w", err)
+		}
+		if on && !hasPasskey {
+			return ErrNoPasskey
+		}
+		if _, err := tx.Exec(ctx, `UPDATE accounts SET is_operator = $2 WHERE id = $1`, id, on); err != nil {
 			return fmt.Errorf("admin: set operator: %w", err)
 		}
 		return s.audit(ctx, tx, actor, action, "account:"+id, nil)
@@ -206,7 +221,7 @@ func (s *Service) invite(ctx context.Context, actor, email, action, lookup strin
 		if err != nil {
 			return err
 		}
-		code, expires, err := s.auth.IssueInviteTx(ctx, tx, email)
+		inviteID, code, expires, err := s.auth.IssueInviteTx(ctx, tx, email)
 		if err != nil {
 			return err
 		}
@@ -214,17 +229,27 @@ func (s *Service) invite(ctx context.Context, actor, email, action, lookup strin
 			return err
 		}
 		// The address is personal data and audit rows outlive an account
-		// (US-018), so the row names the invite by the address's hash.
-		return s.audit(ctx, tx, actor, action, "invite:"+auth.HashEmail(email), map[string]any{
+		// (US-018), so the row names the invite by its id. The invite row is
+		// deleted 14 days after it expires, and the id then links to nothing.
+		return s.audit(ctx, tx, actor, action, "invite:"+inviteID, map[string]any{
 			"expires": expires.UTC().Format(time.RFC3339), "revoked": revoked,
 		})
 	})
 }
 
 // Suspend marks a pending or active tenant suspended. It keeps its place in
-// the beta cap and remembers the status to return to.
+// the beta cap and remembers the status to return to. The actor (an account
+// id when it comes from the web) cannot suspend their own tenant.
 func (s *Service) Suspend(ctx context.Context, actor, tenantID string) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var own bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM accounts WHERE id::text = $1 AND tenant_id = $2)`, actor, tenantID).Scan(&own); err != nil {
+			return fmt.Errorf("admin: suspend: %w", err)
+		}
+		if own {
+			return ErrOwnTenant
+		}
 		tag, err := tx.Exec(ctx, `
 			UPDATE tenants SET status_before_suspend = status, status = 'suspended'
 			WHERE id = $1 AND status IN ('pending', 'active')`, tenantID)

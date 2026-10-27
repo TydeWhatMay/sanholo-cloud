@@ -13,6 +13,8 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/lhaig/sanholo-cloud/internal/mail"
 )
 
 // ChallengeTTL is how long a registration or sign-in ceremony may take.
@@ -26,6 +28,11 @@ var (
 	ErrPasskeyChallenge = errors.New("passkey challenge is missing, used or expired")
 	// ErrPasskeyFailed means the authenticator's answer did not verify.
 	ErrPasskeyFailed = errors.New("passkey could not be verified")
+	// ErrPasskeyStepUp means the account already has a passkey or is an
+	// operator, so another passkey may be added only from a session that was
+	// itself opened with a passkey. A sign-in link, which anyone with the
+	// mailbox holds, must not be able to enrol a key of its own.
+	ErrPasskeyStepUp = errors.New("adding a passkey needs a session opened with a passkey")
 )
 
 const (
@@ -155,12 +162,17 @@ func parseAccountID(id string) (uuid.UUID, error) {
 // BeginPasskeyRegistration starts a registration for a signed-in account. It
 // returns the options JSON for navigator.credentials.create and the secret
 // that binds the ceremony to the browser (set it in a short-lived cookie).
-func (s *Service) BeginPasskeyRegistration(ctx context.Context, accountID string) (options []byte, secret string, err error) {
+// method is how the calling session was opened (MethodMagicLink or
+// MethodPasskey); see ErrPasskeyStepUp.
+func (s *Service) BeginPasskeyRegistration(ctx context.Context, accountID, method string) (options []byte, secret string, err error) {
 	if !s.PasskeysEnabled() {
 		return nil, "", ErrPasskeysDisabled
 	}
 	id, err := parseAccountID(accountID)
 	if err != nil {
+		return nil, "", err
+	}
+	if err := s.checkStepUp(ctx, s.pool, id, method); err != nil {
 		return nil, "", err
 	}
 	user, err := s.loadUser(ctx, id)
@@ -183,10 +195,48 @@ func (s *Service) BeginPasskeyRegistration(ctx context.Context, accountID string
 	return options, secret, err
 }
 
+// checkStepUp refuses a session that was not opened with a passkey when the
+// account already has a passkey or is an operator. A magic-link session may
+// still add the very first passkey of an ordinary account.
+func (s *Service) checkStepUp(ctx context.Context, q queryRower, accountID uuid.UUID, method string) error {
+	if method == MethodPasskey {
+		return nil
+	}
+	var locked bool
+	err := q.QueryRow(ctx, `
+		SELECT is_operator OR EXISTS (SELECT 1 FROM passkeys WHERE account_id = accounts.id)
+		FROM accounts WHERE id = $1`, accountID).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrPasskeyFailed
+	}
+	if err != nil {
+		return fmt.Errorf("auth: passkey step-up: %w", err)
+	}
+	if locked {
+		return ErrPasskeyStepUp
+	}
+	return nil
+}
+
+// PasskeyAddedMessage is the email that tells an account holder a passkey
+// was added, in the company register.
+func PasskeyAddedMessage(to string, at time.Time) mail.Message {
+	return mail.Message{
+		To:      to,
+		Subject: "A passkey was added to your SanHolo account",
+		Body: "TydeWhatMay sends this email because a passkey was added to the SanHolo account for this address on " +
+			at.UTC().Format("2006-01-02 15:04 UTC") + ".\n\n" +
+			"If you added it, you need do nothing.\n" +
+			"If you did not, sign in, remove the passkey on the account page and sign out the sessions you do not know. " +
+			"Write to hello@tydewhatmay.eu if you cannot sign in.\n",
+	}
+}
+
 // FinishPasskeyRegistration verifies the authenticator's answer and stores
-// the credential on the account. The challenge is spent first, whatever the
+// the credential on the account, and queues the email that tells the account
+// holder, in the same transaction. The challenge is spent first, whatever the
 // outcome.
-func (s *Service) FinishPasskeyRegistration(ctx context.Context, accountID, secret string, body []byte) (Passkey, error) {
+func (s *Service) FinishPasskeyRegistration(ctx context.Context, accountID, method, secret string, body []byte) (Passkey, error) {
 	if !s.PasskeysEnabled() {
 		return Passkey{}, ErrPasskeysDisabled
 	}
@@ -215,10 +265,29 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, accountID, secr
 		return Passkey{}, fmt.Errorf("auth: passkey record: %w", err)
 	}
 	now := s.now()
-	if _, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Passkey{}, fmt.Errorf("auth: store passkey: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Lock the account row, so two registrations racing from sign-in links
+	// cannot both see "no passkey yet".
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE`, id); err != nil {
+		return Passkey{}, fmt.Errorf("auth: store passkey: %w", err)
+	}
+	if err := s.checkStepUp(ctx, tx, id, method); err != nil {
+		return Passkey{}, err
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO passkeys (id, account_id, credential, sign_count, created_at) VALUES ($1, $2, $3, $4, $5)`,
 		cred.ID, id, raw, int64(cred.Authenticator.SignCount), now); err != nil {
 		return Passkey{}, fmt.Errorf("auth: store passkey: %w", err)
+	}
+	if err := mail.Enqueue(ctx, tx, PasskeyAddedMessage(user.email, now), time.Time{}); err != nil {
+		return Passkey{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Passkey{}, fmt.Errorf("auth: store passkey: commit: %w", err)
 	}
 	return Passkey{ID: base64.RawURLEncoding.EncodeToString(cred.ID), CreatedAt: now}, nil
 }
@@ -279,9 +348,16 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, secret string, body []
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	now := s.now()
+	if s.beforeCounterUpdate != nil {
+		s.beforeCounterUpdate()
+	}
+	// Compare-and-set: the counter must still be below the one presented
+	// (or the authenticator has no counter). Two logins that presented the
+	// same value cannot both pass the clone check in the library, which read
+	// the old value before either wrote.
 	tag, err := tx.Exec(ctx, `
 		UPDATE passkeys SET sign_count = $3, last_used_at = $4, credential = $5
-		WHERE id = $1 AND account_id = $2`,
+		WHERE id = $1 AND account_id = $2 AND (sign_count < $3 OR $3 = 0)`,
 		cred.ID, uuid.UUID(user.WebAuthnID()), int64(cred.Authenticator.SignCount), now, raw)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("auth: passkey sign-in: %w", err)
@@ -323,7 +399,9 @@ func (s *Service) ListPasskeys(ctx context.Context, accountID string) ([]Passkey
 	return out, rows.Err()
 }
 
-// DeletePasskey removes one of the account's own passkeys. An id that is
+// DeletePasskey removes one of the account's own passkeys and signs out the
+// account's sessions that were opened with a passkey (sessions do not record
+// which one), so a stolen device's session ends with its key. An id that is
 // malformed or belongs to another account removes nothing and reports false.
 func (s *Service) DeletePasskey(ctx context.Context, accountID, passkeyID string) (bool, error) {
 	id, err := parseAccountID(accountID)
@@ -334,9 +412,23 @@ func (s *Service) DeletePasskey(ctx context.Context, accountID, passkeyID string
 	if err != nil {
 		return false, nil
 	}
-	tag, err := s.pool.Exec(ctx, `DELETE FROM passkeys WHERE id = $1 AND account_id = $2`, raw, id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("auth: delete passkey: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `DELETE FROM passkeys WHERE id = $1 AND account_id = $2`, raw, id)
+	if err != nil {
+		return false, fmt.Errorf("auth: delete passkey: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM account_sessions WHERE account_id = $1 AND method = $2`, id, MethodPasskey); err != nil {
+		return false, fmt.Errorf("auth: delete passkey: sessions: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("auth: delete passkey: commit: %w", err)
+	}
+	return true, nil
 }

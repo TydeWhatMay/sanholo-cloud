@@ -22,6 +22,9 @@ type Service struct {
 	pool *pgxpool.Pool
 	opt  Options
 	now  func() time.Time
+	// beforeCounterUpdate runs between a passkey assertion being verified
+	// and its counter being written (tests simulate a racing login).
+	beforeCounterUpdate func()
 }
 
 // New returns a Service.

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 )
@@ -68,5 +69,39 @@ func TestTemplatesLoadNothingFromElsewhere(t *testing.T) {
 	}
 	if n < 10 {
 		t.Fatalf("walked %d templates; the embed pattern changed", n)
+	}
+}
+
+// The notice states retention; each claim below is one the code keeps (see
+// auth.Redeem, auth.Cleanup, mail.Worker.RunOnce, auth.SessionTTL).
+func TestPrivacyRetentionMatchesTheCode(t *testing.T) {
+	e := newEnv(t, auth.Options{})
+	body := e.client(t).get("/privacy", nil).body
+	for _, want := range []string{
+		"Waiting list entry: until you create an account, or until you ask for it to be removed.",
+		"Invites: 14 days after they expire. An invite is valid for 14 days.",
+		"Sessions: 30 days after last use.",
+		"A session ends 30 days after it was last used",
+		"is queued until it is sent, and its text is then erased",
+		"no hashes of them",
+		"identifier, not by the email address",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("privacy notice lacks %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"until you are invited",
+		"30 days at most",
+		"The code itself is not stored",
+		"by a hash of the email address",
+		"Unused invite",
+	} {
+		if strings.Contains(body, stale) {
+			t.Errorf("privacy notice still says %q", stale)
+		}
+	}
+	if auth.SessionTTL != 30*24*time.Hour || auth.InviteTTL != 14*24*time.Hour {
+		t.Errorf("session TTL %v or invite TTL %v changed: update the privacy notice", auth.SessionTTL, auth.InviteTTL)
 	}
 }

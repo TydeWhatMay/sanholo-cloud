@@ -136,6 +136,18 @@ func TestLoadHostedSettings(t *testing.T) {
 		}
 		return m
 	}
+	// prodEnv is a complete production environment with one key replaced
+	// (an empty value removes it).
+	prodEnv := func(key, val string) map[string]string {
+		m := map[string]string{
+			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw",
+			"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8",
+		}
+		if key != "" {
+			m[key] = val
+		}
+		return m
+	}
 	cases := []struct {
 		name    string
 		env     map[string]string
@@ -179,11 +191,17 @@ func TestLoadHostedSettings(t *testing.T) {
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_PORT": "465",
 			"SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw", "SMTP_FROM": "SanHolo <no-reply@sanholo.space>",
 			"APP_BASE_URL": "https://app.sanholo.space", "WEBAUTHN_RP_ID": "app.sanholo.space",
+			"TRUSTED_PROXIES": "10.0.0.0/8",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)
 			}
 		}},
+		{"production needs trusted proxies", with(prodEnv("TRUSTED_PROXIES", "")), "TRUSTED_PROXIES", nil},
+		{"production needs explicit base url", with(prodEnv("APP_BASE_URL", "")), "APP_BASE_URL", nil},
+		{"production refuses http base url", with(prodEnv("APP_BASE_URL", "http://localhost:8090")), "APP_BASE_URL", nil},
+		{"production needs smtp username", with(prodEnv("SMTP_USERNAME", "")), "SMTP_USERNAME", nil},
+		{"production complete", with(prodEnv("", "")), "", nil},
 		{"username needs password", with(map[string]string{"SMTP_HOST": "h", "SMTP_USERNAME": "u"}), "SMTP_PASSWORD", nil},
 		{"bad port", with(map[string]string{"SMTP_HOST": "h", "SMTP_PORT": "x"}), "SMTP_PORT", nil},
 		{"line break in from", with(map[string]string{"SMTP_HOST": "h", "SMTP_FROM": "a@b.c\r\nBcc: x@y.z"}), "SMTP_FROM", nil},

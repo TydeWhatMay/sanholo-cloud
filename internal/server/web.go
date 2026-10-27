@@ -26,6 +26,10 @@ var staticFiles embed.FS
 // waitlistLimit is the waiting-list submissions allowed per client IP per hour.
 const waitlistLimit = 10
 
+// signupLimit is the sign-up submissions allowed per client IP per hour: it
+// stops invite codes being guessed.
+const signupLimit = 10
+
 const sessionCookie = "__Host-sanholo_session"
 
 // App is the customer-facing surface of the control plane.
@@ -50,9 +54,12 @@ func (a *App) mount(app *fiber.App) {
 	if err != nil {
 		panic(err)
 	}
-	app.Use("/static", filesystem.New(filesystem.Config{Root: http.FS(static)}))
-
 	app.Use(securityHeaders)
+	// Static files carry the security headers too (nosniff, CSP). They sit
+	// before the CSRF middleware, which would otherwise set a cookie on them.
+	// The filesystem middleware's Cache-Control replaces no-store: the assets
+	// are not personal and an hour's caching is harmless.
+	app.Use("/static", filesystem.New(filesystem.Config{Root: http.FS(static), MaxAge: 3600}))
 	app.Use(csrf())
 
 	app.Get("/", a.home)
@@ -159,7 +166,14 @@ func (a *App) signupForm(c *fiber.Ctx) error {
 }
 
 func (a *App) signup(c *fiber.Ctx) error {
-	_, err := a.Auth.Redeem(c.UserContext(), c.FormValue("code"))
+	ok, err := a.Auth.Allow(c.UserContext(), "signup:ip:"+a.clientIP(c), signupLimit, time.Hour)
+	if err != nil {
+		return a.serverError(c)
+	}
+	if !ok {
+		return a.message(c, fiber.StatusTooManyRequests, "Too many requests", "Wait an hour before trying again.")
+	}
+	_, err = a.Auth.Redeem(c.UserContext(), c.FormValue("code"))
 	if err != nil {
 		return a.inviteError(c, err)
 	}

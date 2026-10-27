@@ -71,7 +71,8 @@ func truncateUA(s string) string {
 }
 
 // LookupSession finds the live session for a cookie secret and slides its
-// expiry. An unknown, revoked or expired secret is ErrNoSession.
+// expiry. An unknown, revoked or expired secret is ErrNoSession, and so is
+// the secret of an account whose tenant is suspended.
 func (s *Service) LookupSession(ctx context.Context, secret string) (Session, error) {
 	if secret == "" {
 		return Session{}, ErrNoSession
@@ -80,8 +81,8 @@ func (s *Service) LookupSession(ctx context.Context, secret string) (Session, er
 	var ses Session
 	err := s.pool.QueryRow(ctx, `
 		SELECT s.id::text, s.account_id::text, a.tenant_id, a.email, s.created_at, s.last_seen_at, s.expires_at, s.user_agent, s.method, a.is_operator
-		FROM account_sessions s JOIN accounts a ON a.id = s.account_id
-		WHERE s.secret_hash = $1 AND s.expires_at > $2`, HashSecret(secret), now,
+		FROM account_sessions s JOIN accounts a ON a.id = s.account_id JOIN tenants t ON t.id = a.tenant_id
+		WHERE s.secret_hash = $1 AND s.expires_at > $2 AND t.status <> 'suspended'`, HashSecret(secret), now,
 	).Scan(&ses.ID, &ses.AccountID, &ses.TenantID, &ses.Email, &ses.CreatedAt, &ses.LastSeenAt, &ses.ExpiresAt, &ses.UserAgent, &ses.Method, &ses.IsOperator)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrNoSession

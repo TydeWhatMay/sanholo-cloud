@@ -53,6 +53,16 @@ func (f *fixture) account(t *testing.T, email string) (accountID, tenantID strin
 	return accountID, tenantID
 }
 
+// passkey stores a credential row for the account, as a finished
+// registration would leave it.
+func (f *fixture) passkey(t *testing.T, accountID string) {
+	t.Helper()
+	if _, err := f.pool.Exec(context.Background(),
+		`INSERT INTO passkeys (id, account_id, credential) VALUES (gen_random_uuid()::text::bytea, $1, '{}')`, accountID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (f *fixture) waitlist(t *testing.T, email string) {
 	t.Helper()
 	if err := f.auth.JoinWaitlist(context.Background(), email); err != nil {
@@ -78,6 +88,7 @@ func TestSetOperatorWritesAuditAsCLI(t *testing.T) {
 	f := newFixture(t, 20)
 	ctx := context.Background()
 	id, _ := f.account(t, "op@example.org")
+	f.passkey(t, id)
 
 	if err := f.svc.SetOperator(ctx, ActorCLI, "OP@example.org", true); err != nil {
 		t.Fatal(err)
@@ -117,7 +128,8 @@ func TestSetOperatorUnknownAccount(t *testing.T) {
 func TestChangeAndAuditShareATransaction(t *testing.T) {
 	f := newFixture(t, 20)
 	ctx := context.Background()
-	f.account(t, "op@example.org")
+	opID, _ := f.account(t, "op@example.org")
+	f.passkey(t, opID)
 	_, tenantID := f.account(t, "t@example.org")
 	f.waitlist(t, "w@example.org")
 	f.failAudit(t)
@@ -185,12 +197,20 @@ func TestIssueInviteQueuesMailAndHidesTheCode(t *testing.T) {
 	if err := f.pool.QueryRow(ctx, `SELECT actor, action, target, audit_log::text FROM audit_log`).Scan(&actor, &action, &target, &row); err != nil {
 		t.Fatal(err)
 	}
-	if actor != "actor-1" || action != "invite.issue" || target != "invite:"+auth.HashEmail("w@example.org") {
+	var inviteID string
+	if err := f.pool.QueryRow(ctx, `SELECT id::text FROM invites`).Scan(&inviteID); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "actor-1" || action != "invite.issue" || target != "invite:"+inviteID {
 		t.Errorf("audit = %q %q %q", actor, action, target)
 	}
 	// Audit rows outlive an account, so they must not hold the address.
 	if strings.Contains(strings.ToLower(row), "w@example.org") {
 		t.Errorf("audit row holds the email address: %s", row)
+	}
+	// Nor an unsalted hash of it, which can be confirmed by guessing.
+	if strings.Contains(row, auth.HashEmail("w@example.org")) {
+		t.Errorf("audit row holds the hash of the email address: %s", row)
 	}
 }
 
@@ -387,7 +407,8 @@ func TestSchemaHasNoTokenColumnsExceptHashes(t *testing.T) {
 func TestFailedCommitLeavesNoAuditRow(t *testing.T) {
 	f := newFixture(t, 20)
 	ctx := context.Background()
-	f.account(t, "op@example.org")
+	opID, _ := f.account(t, "op@example.org")
+	f.passkey(t, opID)
 	_, tenantID := f.account(t, "t@example.org")
 	f.waitlist(t, "w@example.org")
 	for _, q := range []string{
@@ -411,5 +432,53 @@ func TestFailedCommitLeavesNoAuditRow(t *testing.T) {
 	}
 	if n := f.count(t, `SELECT count(*) FROM audit_log`); n != 0 {
 		t.Fatalf("%d audit rows describe changes that did not happen", n)
+	}
+}
+
+func TestSetOperatorNeedsAPasskey(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	id, _ := f.account(t, "op@example.org")
+
+	err := f.svc.SetOperator(ctx, ActorCLI, "op@example.org", true)
+	if !errors.Is(err, ErrNoPasskey) {
+		t.Fatalf("grant without a passkey = %v, want ErrNoPasskey", err)
+	}
+	if f.count(t, `SELECT count(*) FROM accounts WHERE is_operator`) != 0 || f.count(t, `SELECT count(*) FROM audit_log`) != 0 {
+		t.Fatal("a refused grant changed something")
+	}
+	f.passkey(t, id)
+	if err := f.svc.SetOperator(ctx, ActorCLI, "op@example.org", true); err != nil {
+		t.Fatalf("grant with a passkey: %v", err)
+	}
+	// Revoking never needs a passkey.
+	if _, err := f.pool.Exec(ctx, `DELETE FROM passkeys`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.SetOperator(ctx, ActorCLI, "op@example.org", false); err != nil {
+		t.Fatalf("revoke without a passkey: %v", err)
+	}
+}
+
+func TestSuspendRefusesTheActorsOwnTenant(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	opID, opTenant := f.account(t, "op@example.org")
+	_, otherTenant := f.account(t, "t@example.org")
+
+	if err := f.svc.Suspend(ctx, opID, opTenant); !errors.Is(err, ErrOwnTenant) {
+		t.Fatalf("own tenant = %v, want ErrOwnTenant", err)
+	}
+	var status string
+	_ = f.pool.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1`, opTenant).Scan(&status)
+	if status == "suspended" || f.count(t, `SELECT count(*) FROM audit_log`) != 0 {
+		t.Fatalf("own tenant status %q, audit rows written", status)
+	}
+	// Another operator's tenant, and the CLI, are unaffected.
+	if err := f.svc.Suspend(ctx, opID, otherTenant); err != nil {
+		t.Fatalf("another tenant: %v", err)
+	}
+	if err := f.svc.Suspend(ctx, ActorCLI, opTenant); err != nil {
+		t.Fatalf("cli suspends any tenant: %v", err)
 	}
 }

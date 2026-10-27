@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/webauthntest"
@@ -227,5 +228,79 @@ func TestPasskeyScriptIsStaticAndCSPStaysStrict(t *testing.T) {
 	csp := page.header.Get("Content-Security-Policy")
 	if !strings.Contains(csp, "script-src 'self';") || strings.Contains(csp, "unsafe") {
 		t.Fatalf("csp = %q", csp)
+	}
+}
+
+func TestPasskeyEnrolmentNeedsAPasskeySessionOnceOneExists(t *testing.T) {
+	e := passkeyEnv(t)
+	e.account(t, "a@example.org")
+	link := e.signedIn(t, "a@example.org")
+
+	// The first passkey of an ordinary account may come from a link session.
+	au := addPasskey(t, link)
+	// A second ceremony from the same link session is refused at once, and
+	// stores no challenge.
+	before := rows(t, e.pool, `SELECT count(*) FROM webauthn_challenges`)
+	if r := link.postJSON("/account/passkeys/register/begin", ""); r.status != 403 {
+		t.Fatalf("link session adding a second passkey: %d %s", r.status, r.body)
+	}
+	if rows(t, e.pool, `SELECT count(*) FROM webauthn_challenges`) != before {
+		t.Error("a refused begin stored a challenge")
+	}
+	// A passkey session may add another.
+	pk := e.client(t)
+	if r := passkeySignIn(t, pk, au); r.status != 200 {
+		t.Fatalf("passkey sign-in: %d", r.status)
+	}
+	addPasskey(t, pk)
+	if n := rows(t, e.pool, `SELECT count(*) FROM passkeys`); n != 2 {
+		t.Fatalf("passkeys = %d, want 2", n)
+	}
+	// Every registration told the account holder.
+	if n := rows(t, e.pool, `SELECT count(*) FROM mail_outbox WHERE to_email = 'a@example.org' AND subject LIKE '%passkey was added%'`); n != 2 {
+		t.Fatalf("notification emails = %d, want 2", n)
+	}
+}
+
+func TestOperatorCannotEnrolAPasskeyFromALink(t *testing.T) {
+	e := passkeyEnv(t)
+	_, opLink := operator(t, e, "op@example.org")
+	if r := opLink.postJSON("/account/passkeys/register/begin", ""); r.status != 403 {
+		t.Fatalf("operator link session: %d %s", r.status, r.body)
+	}
+}
+
+func TestDeletingAPasskeyEndsPasskeySessionsOverHTTP(t *testing.T) {
+	e := passkeyEnv(t)
+	e.account(t, "a@example.org")
+	link := e.signedIn(t, "a@example.org")
+	au := addPasskey(t, link)
+	pk := e.client(t)
+	if r := passkeySignIn(t, pk, au); r.status != 200 {
+		t.Fatalf("passkey sign-in: %d", r.status)
+	}
+	list, _ := e.svc.ListPasskeys(context.Background(), accountOf(t, e, "a@example.org"))
+
+	// The passkey session makes the request and is itself ended.
+	old := pk.cookies[sessionCookie]
+	r := pk.post("/account/passkeys/"+list[0].ID+"/delete", nil)
+	if r.status != 303 || r.header.Get("Location") != "/signin" {
+		t.Fatalf("delete from the passkey session: %d %q", r.status, r.header.Get("Location"))
+	}
+	var cleared bool
+	for _, ck := range r.cookies {
+		cleared = cleared || (ck.Name == sessionCookie && ck.Value == "" && ck.Expires.Before(time.Now()))
+	}
+	if !cleared {
+		t.Errorf("session cookie not cleared: %+v", r.cookies)
+	}
+	// The old cookie, replayed, is dead on the server.
+	replay := e.client(t)
+	replay.cookies[sessionCookie] = old
+	if got := replay.get("/account/", nil); got.status != 303 || got.header.Get("Location") != "/signin" {
+		t.Fatalf("ended session still works: %d", got.status)
+	}
+	if got := link.get("/account/", nil); got.status != 200 {
+		t.Fatalf("link session ended: %d", got.status)
 	}
 }

@@ -37,15 +37,20 @@ func (s *Service) RequestSignIn(ctx context.Context, email, clientIP string) err
 		return err
 	}
 	h := HashEmail(email)
-	okEmail, err := s.Allow(ctx, "signin:email:"+h, SigninLimit, SigninWindow)
-	if err != nil {
-		return err
-	}
+	// The IP is checked first and the address counted only for an allowed
+	// IP, so one client cannot hold a victim's address over its limit.
 	okIP, err := s.Allow(ctx, "signin:ip:"+clientIP, SigninLimit, SigninWindow)
 	if err != nil {
 		return err
 	}
-	if !okEmail || !okIP {
+	if !okIP {
+		return ErrRateLimited
+	}
+	okEmail, err := s.Allow(ctx, "signin:email:"+h, SigninLimit, SigninWindow)
+	if err != nil {
+		return err
+	}
+	if !okEmail {
 		return ErrRateLimited
 	}
 	if _, err := s.pool.Exec(ctx,

@@ -610,3 +610,55 @@ func TestWaitlistRateLimitPerIP(t *testing.T) {
 		t.Fatal("another client is limited too")
 	}
 }
+
+func TestSignupRateLimitPerIP(t *testing.T) {
+	peer := netip.PrefixFrom(netip.MustParseAddr("0.0.0.0"), 32)
+	e := newEnv(t, auth.Options{}, peer)
+	c := e.client(t)
+	post := func(code, ip string) result {
+		c.get("/", nil)
+		return c.do("POST", "/signup", url.Values{"code": {code}, "csrf": {c.cookies[csrfCookie].Value}},
+			map[string]string{"X-Forwarded-For": ip})
+	}
+	for i := range signupLimit {
+		if r := post("not-a-code", "198.51.100.1"); r.status != 403 {
+			t.Fatalf("guess %d: %d", i, r.status)
+		}
+	}
+	// A valid code from the limited address must not redeem.
+	code, _, err := e.svc.IssueInvite(context.Background(), "a@example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := post(code, "198.51.100.1"); r.status != 429 {
+		t.Fatalf("over the limit: %d, want 429", r.status)
+	}
+	if n := rows(t, e.pool, `SELECT count(*) FROM accounts`); n != 0 {
+		t.Fatalf("accounts = %d: a limited sign-up must create nothing", n)
+	}
+	if r := post(code, "198.51.100.2"); r.status != 200 {
+		t.Fatalf("another client: %d", r.status)
+	}
+}
+
+func TestStaticFilesCarrySecurityHeaders(t *testing.T) {
+	e := newEnv(t, auth.Options{})
+	for _, path := range []string{"/static/htmx.min.js", "/static/app.css", "/static/passkey.js"} {
+		r := e.client(t).get(path, nil)
+		if r.status != 200 {
+			t.Fatalf("%s: %d", path, r.status)
+		}
+		if got := r.header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s X-Content-Type-Options = %q", path, got)
+		}
+		if csp := r.header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+			t.Errorf("%s CSP = %q", path, csp)
+		}
+		if cc := r.header.Get("Cache-Control"); !strings.Contains(cc, "max-age=") || strings.Contains(cc, "no-store") {
+			t.Errorf("%s Cache-Control = %q", path, cc)
+		}
+		if len(r.cookies) != 0 {
+			t.Errorf("%s sets a cookie", path)
+		}
+	}
+}

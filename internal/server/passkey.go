@@ -46,6 +46,8 @@ func passkeyError(c *fiber.Ctx, err error, failStatus int) error {
 		return c.SendStatus(fiber.StatusNotFound)
 	case errors.Is(err, auth.ErrPasskeyChallenge):
 		return jsonError(c, fiber.StatusBadRequest, "The request expired. Start again.")
+	case errors.Is(err, auth.ErrPasskeyStepUp):
+		return jsonError(c, fiber.StatusForbidden, "Sign in with an existing passkey to add another.")
 	case errors.Is(err, auth.ErrPasskeyFailed):
 		return jsonError(c, failStatus, "The passkey was not accepted.")
 	}
@@ -68,7 +70,7 @@ func (a *App) passkeyRegisterBegin(c *fiber.Ctx) error {
 	if !ok {
 		return jsonError(c, fiber.StatusTooManyRequests, "Too many requests. Wait an hour.")
 	}
-	opts, secret, err := a.Auth.BeginPasskeyRegistration(c.UserContext(), ses.AccountID)
+	opts, secret, err := a.Auth.BeginPasskeyRegistration(c.UserContext(), ses.AccountID, ses.Method)
 	if err != nil {
 		return passkeyError(c, err, fiber.StatusBadRequest)
 	}
@@ -82,7 +84,7 @@ func (a *App) passkeyRegisterFinish(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusNotFound)
 	}
 	ses := c.Locals("session").(auth.Session)
-	_, err := a.Auth.FinishPasskeyRegistration(c.UserContext(), ses.AccountID, c.Cookies(challengeCookie), c.Body())
+	_, err := a.Auth.FinishPasskeyRegistration(c.UserContext(), ses.AccountID, ses.Method, c.Cookies(challengeCookie), c.Body())
 	clearChallengeCookie(c)
 	if err != nil {
 		return passkeyError(c, err, fiber.StatusBadRequest)
@@ -129,8 +131,15 @@ func (a *App) passkeyLoginFinish(c *fiber.Ctx) error {
 
 func (a *App) passkeyDelete(c *fiber.Ctx) error {
 	ses := c.Locals("session").(auth.Session)
-	if _, err := a.Auth.DeletePasskey(c.UserContext(), ses.AccountID, c.Params("id")); err != nil {
+	deleted, err := a.Auth.DeletePasskey(c.UserContext(), ses.AccountID, c.Params("id"))
+	if err != nil {
 		return a.serverError(c)
+	}
+	// Deleting a passkey ends the account's passkey sessions, this one
+	// included when it was opened with a passkey.
+	if deleted && ses.Method == auth.MethodPasskey {
+		clearSessionCookie(c)
+		return c.Redirect("/signin", fiber.StatusSeeOther)
 	}
 	return c.Redirect("/account", fiber.StatusSeeOther)
 }

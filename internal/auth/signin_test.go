@@ -238,6 +238,12 @@ func TestClientIP(t *testing.T) {
 		{"trusted peer, all trusted", "10.0.0.1", "10.0.0.2", "10.0.0.1"},
 		{"v4-mapped peer", "::ffff:10.0.0.1", "203.0.113.9", "203.0.113.9"},
 		{"no trusted list", "198.51.100.7", "1.2.3.4", "198.51.100.7"},
+		{"v6 peer keyed on its /64", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "", "2001:db8:1:2::/64"},
+		{"v6 same /64 same key", "2001:db8:1:2:1::9", "", "2001:db8:1:2::/64"},
+		{"v6 next /64 differs", "2001:db8:1:3::1", "", "2001:db8:1:3::/64"},
+		{"v6 client behind the edge", "10.0.0.1", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"},
+		{"v4-mapped client behind the edge", "10.0.0.1", "::ffff:203.0.113.9", "203.0.113.9"},
+		{"v4-mapped peer unchanged", "::ffff:198.51.100.7", "", "198.51.100.7"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -328,5 +334,83 @@ func TestSessionsSlideListAndRevoke(t *testing.T) {
 	}
 	if _, err := s.LookupSession(ctx, ""); !errors.Is(err, ErrNoSession) {
 		t.Fatal("empty secret")
+	}
+}
+
+func TestAllowStopsCountingOverTheLimit(t *testing.T) {
+	s, pool := newSvc(t, Options{})
+	ctx := context.Background()
+	for i := range 10 {
+		ok, err := s.Allow(ctx, "k", 3, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := i < 3; ok != want {
+			t.Fatalf("hit %d: allowed = %v, want %v", i+1, ok, want)
+		}
+	}
+	if n := count(t, pool, `SELECT count FROM rate_counters WHERE key = 'k'`); n != 4 {
+		t.Fatalf("counter = %d, want 4 (limit+1)", n)
+	}
+}
+
+func TestSigninIPLimitDoesNotBurnAnotherIPsEmailBudget(t *testing.T) {
+	s, pool := newSvc(t, Options{})
+	ctx := context.Background()
+	// One IP exhausts its own budget by asking for a victim's address, then
+	// keeps hammering.
+	for range SigninLimit + 20 {
+		_ = s.RequestSignIn(ctx, "victim@example.org", "192.0.2.1")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM signin_requests`); n != SigninLimit {
+		t.Fatalf("requests accepted = %d, want %d", n, SigninLimit)
+	}
+	if n := count(t, pool, `SELECT count FROM rate_counters WHERE key = 'signin:email:`+HashEmail("victim@example.org")+`'`); n != SigninLimit {
+		t.Fatalf("victim's counter = %d, want %d: a limited IP kept counting", n, SigninLimit)
+	}
+	// A second IP asking for a different address is untouched.
+	if err := s.RequestSignIn(ctx, "other@example.org", "192.0.2.1"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("limited IP: %v", err)
+	}
+	if err := s.RequestSignIn(ctx, "other@example.org", "192.0.2.2"); err != nil {
+		t.Fatalf("second IP, other address: %v", err)
+	}
+}
+
+func TestSuspendedTenantSessionsAreRefused(t *testing.T) {
+	s, pool := newSvc(t, Options{BaseURL: "http://127.0.0.1:8090"})
+	ctx := context.Background()
+	newAccount(t, s, "a@example.org")
+	newAccount(t, s, "b@example.org")
+	login := func(email string) string {
+		_ = s.RequestSignIn(ctx, email, "192.0.2.1")
+		_, _ = s.ProcessSignInRequests(ctx)
+		msgs := outbox(t, pool)
+		sec, _, err := s.ConsumeMagicLink(ctx, tokenFrom(t, msgs[len(msgs)-1]), "ua")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sec
+	}
+	a, b := login("a@example.org"), login("b@example.org")
+	if _, err := s.LookupSession(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE tenants SET status_before_suspend = status, status = 'suspended' WHERE id = (SELECT tenant_id FROM accounts WHERE email = 'a@example.org')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupSession(ctx, a); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("suspended tenant's session: %v", err)
+	}
+	if _, err := s.LookupSession(ctx, b); err != nil {
+		t.Fatalf("another tenant's session: %v", err)
+	}
+	// Unsuspended, the same session works again.
+	if _, err := pool.Exec(ctx, `UPDATE tenants SET status = status_before_suspend WHERE status = 'suspended'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupSession(ctx, a); err != nil {
+		t.Fatalf("after unsuspend: %v", err)
 	}
 }

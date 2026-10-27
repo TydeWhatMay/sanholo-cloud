@@ -18,7 +18,9 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Authenticator holds one credential. Counter is the value the next
+// Authenticator holds one credential. Origin is what the browser puts in
+// clientDataJSON; tests set it to another origin to simulate a phishing
+// page. Counter is the value the next
 // assertion reports; tests may set it to simulate a cloned authenticator.
 type Authenticator struct {
 	RPID    string
@@ -27,6 +29,9 @@ type Authenticator struct {
 	Counter uint32
 	// UserHandle is returned in assertions, as a resident credential does.
 	UserHandle []byte
+	// NoUV leaves the user-verified flag out of what the authenticator
+	// reports, as a key that only checked presence would.
+	NoUV bool
 
 	key *ecdsa.PrivateKey
 }
@@ -76,6 +81,13 @@ const (
 	flagAT = 0x40
 )
 
+func (a *Authenticator) flags() byte {
+	if a.NoUV {
+		return flagUP
+	}
+	return flagUP | flagUV
+}
+
 // Create answers the JSON of a registration begin response.
 func (a *Authenticator) Create(optionsJSON []byte) ([]byte, error) {
 	var o options
@@ -99,7 +111,7 @@ func (a *Authenticator) Create(optionsJSON []byte) ([]byte, error) {
 	}
 	rp := sha256.Sum256([]byte(a.RPID))
 	ad := append([]byte{}, rp[:]...)
-	ad = append(ad, flagUP|flagUV|flagAT)
+	ad = append(ad, a.flags()|flagAT)
 	ad = binary.BigEndian.AppendUint32(ad, 0)
 	ad = append(ad, make([]byte, 16)...) // zero AAGUID
 	ad = binary.BigEndian.AppendUint16(ad, idLen)
@@ -128,7 +140,7 @@ func (a *Authenticator) Get(optionsJSON []byte) ([]byte, error) {
 	})
 	rp := sha256.Sum256([]byte(a.RPID))
 	ad := append([]byte{}, rp[:]...)
-	ad = append(ad, flagUP|flagUV)
+	ad = append(ad, a.flags())
 	ad = binary.BigEndian.AppendUint32(ad, a.Counter)
 	cdh := sha256.Sum256(cd)
 	digest := sha256.Sum256(append(append([]byte{}, ad...), cdh[:]...))

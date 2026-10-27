@@ -14,11 +14,13 @@ import (
 func operator(t *testing.T, e *env, email string) (viaPasskey, viaLink *client) {
 	t.Helper()
 	e.account(t, email)
+	// The order an operator really follows: sign in by link, add a passkey,
+	// and only then is the account made an operator.
+	viaLink = e.signedIn(t, email)
+	au := addPasskey(t, viaLink)
 	if err := e.admin.SetOperator(context.Background(), admin.ActorCLI, email, true); err != nil {
 		t.Fatal(err)
 	}
-	viaLink = e.signedIn(t, email)
-	au := addPasskey(t, viaLink)
 	viaPasskey = e.client(t)
 	if r := passkeySignIn(t, viaPasskey, au); r.status != 200 {
 		t.Fatalf("operator passkey sign-in: %d %s", r.status, r.body)
@@ -211,5 +213,39 @@ func TestAdminActions(t *testing.T) {
 	}
 	if rows(t, e.pool, `SELECT count(*) FROM audit_log`) != before {
 		t.Error("refused actions were audited")
+	}
+}
+
+func TestOperatorCannotSuspendTheirOwnTenant(t *testing.T) {
+	e := passkeyEnv(t)
+	op, _ := operator(t, e, "op@example.org")
+	var tenantID string
+	_ = e.pool.QueryRow(context.Background(), `SELECT tenant_id FROM accounts WHERE email = 'op@example.org'`).Scan(&tenantID)
+	if r := op.post("/admin/tenants/"+tenantID+"/suspend", nil); r.status != 409 {
+		t.Fatalf("own tenant: %d %s", r.status, r.body)
+	}
+	if n := rows(t, e.pool, `SELECT count(*) FROM tenants WHERE status = 'suspended'`); n != 0 {
+		t.Fatal("the operator's own tenant was suspended")
+	}
+	if r := op.get("/admin", nil); r.status != 200 {
+		t.Fatalf("admin after the refusal: %d", r.status)
+	}
+}
+
+func TestSuspendedTenantIsSignedOut(t *testing.T) {
+	e := passkeyEnv(t)
+	op, _ := operator(t, e, "op@example.org")
+	e.account(t, "user@example.org")
+	user := e.signedIn(t, "user@example.org")
+	var tenantID string
+	_ = e.pool.QueryRow(context.Background(), `SELECT tenant_id FROM accounts WHERE email = 'user@example.org'`).Scan(&tenantID)
+	if r := user.get("/account/", nil); r.status != 200 {
+		t.Fatalf("before: %d", r.status)
+	}
+	if r := op.post("/admin/tenants/"+tenantID+"/suspend", nil); r.status != 303 {
+		t.Fatalf("suspend: %d", r.status)
+	}
+	if r := user.get("/account/", nil); r.status != 303 || r.header.Get("Location") != "/signin" {
+		t.Fatalf("suspended user: %d %q", r.status, r.header.Get("Location"))
 	}
 }

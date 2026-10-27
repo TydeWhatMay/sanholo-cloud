@@ -45,12 +45,14 @@ func (s *Service) JoinWaitlist(ctx context.Context, email string) error {
 // plaintext code. This is the only moment the code exists in clear: the
 // database keeps its SHA-256.
 func (s *Service) IssueInvite(ctx context.Context, email string) (code string, expires time.Time, err error) {
-	return s.issueInvite(ctx, s.pool, email)
+	_, code, expires, err = s.issueInvite(ctx, s.pool, email)
+	return code, expires, err
 }
 
 // IssueInviteTx is IssueInvite inside the caller's transaction, so the
-// invite, its email and an audit row commit together.
-func (s *Service) IssueInviteTx(ctx context.Context, tx pgx.Tx, email string) (code string, expires time.Time, err error) {
+// invite, its email and an audit row commit together. It also returns the
+// invite's id, which audit rows use to name it.
+func (s *Service) IssueInviteTx(ctx context.Context, tx pgx.Tx, email string) (id, code string, expires time.Time, err error) {
 	return s.issueInvite(ctx, tx, email)
 }
 
@@ -83,25 +85,25 @@ func InviteMessage(to, link string, expires time.Time) mail.Message {
 	}
 }
 
-type execer interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func (s *Service) issueInvite(ctx context.Context, db execer, email string) (code string, expires time.Time, err error) {
+func (s *Service) issueInvite(ctx context.Context, db queryRower, email string) (id, code string, expires time.Time, err error) {
 	email, err = ValidateEmail(email)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", "", time.Time{}, err
 	}
 	code = NewSecret()
 	now := s.now()
 	expires = now.Add(InviteTTL)
-	_, err = db.Exec(ctx,
-		`INSERT INTO invites (code_hash, email, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
-		HashSecret(code), email, now, expires)
+	err = db.QueryRow(ctx,
+		`INSERT INTO invites (code_hash, email, created_at, expires_at) VALUES ($1, $2, $3, $4) RETURNING id::text`,
+		HashSecret(code), email, now, expires).Scan(&id)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("auth: issue invite: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("auth: issue invite: %w", err)
 	}
-	return code, expires, nil
+	return id, code, expires, nil
 }
 
 // InviteEmail returns the address an unused, unexpired invite is bound to,
