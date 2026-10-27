@@ -6,8 +6,8 @@ stories. The client half (Phase 86 in TydeWhatMay/san-holo) is done; the
 cloud side must match `prds/research/client-handoff-notes.md`.
 
 External dependencies, and how each phase copes with them:
-- qm integration contract (tenant-scoped secrets): pending. Build against a
-  fake qm with every wire detail in one file.
+- qm integration contract: decided 2026-10-27 (`prds/research/qm-contract.md`).
+  Deletion needs qm Part E (metadata delete, purge), not yet built: launch gate.
 - Nomad on nomad-prod, DNS, Traefik: owned by the TydeWhatMay/infra session.
   Build against a fake Nomad HTTP API; deploy files live in `deploy/`.
 - Developer permission, fresh-player soak, security review: launch gates
@@ -29,6 +29,7 @@ External dependencies, and how each phase copes with them:
 | # | Task | PRD | Status | Notes |
 |---|------|-----|--------|-------|
 | 2.1 | `secrets` package: write-only qm client (put, list, destroy; never read), `PurgeTenant` / `Rotate` as the only deletion path; fake qm. | [prd](backlog/prd-sanholo-saas.md) | DONE | US-002/US-014 cloud side |
+| 2.1b | Align `internal/secrets` with the qm contract (`prds/research/qm-contract.md`): AppRole login + renew-self, flat replies, sys/health, 403/503 mapping, drop list and destroy, Rotate = write, deletion via Part E metadata delete / purge (provisional). | [prd](backlog/prd-sanholo-saas.md) | TODO | after 2.2 lands |
 | 2.2 | US-011 connect a game account: validate the token with one game read, store via `secrets`, refuse an account already connected elsewhere (by account id), one account per tenant in the beta, create-account flow queued if registration is per IP. | [prd](backlog/prd-sanholo-saas.md) | ACTIVE | needs 2.1 |
 | 2.3 | US-012 provisioning through the Nomad HTTP API: job template (one task, image `ghcr.io/tydewhatmay/sanholo:vX.Y.Z`, two identity blocks `qm.sanholo` + `sanholo.cloud`, kill_timeout 20 s, health check on /healthz with warm-up grace), golden test, register/poll/stop, namespace-scoped token; fake Nomad. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 2.2 |
 | 2.4 | US-015 authenticating proxy: per-tenant subdomain routing, Ed25519 identity per request (format in the handoff notes), strip client copies, one-time handoff code to a host-only Bridge cookie, CSRF headers passed through, security headers. | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 1.3, 2.3 |
