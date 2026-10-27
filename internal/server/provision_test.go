@@ -43,7 +43,10 @@ func (c *testClock) advance(d time.Duration) {
 
 // newProvEnv is a game environment whose app also provisions through a fake
 // Nomad. Clients must be made after it returns.
-func newProvEnv(t *testing.T) *provEnv {
+func newProvEnv(t *testing.T) *provEnv { return newProvEnvPoll(t, 5*time.Millisecond) }
+
+// newProvEnvPoll is newProvEnv with the interval at which a start is followed.
+func newProvEnvPoll(t *testing.T, poll time.Duration) *provEnv {
 	t.Helper()
 	g := newGameEnv(t)
 	fake := nomadfake.New(t, nomadTok, "sanholo")
@@ -52,7 +55,7 @@ func newProvEnv(t *testing.T) *provEnv {
 		t.Fatal(err)
 	}
 	prov, err := provision.New(g.pool, nc, provision.Options{
-		Settings: nomadfake.Settings(), Volume: nomadfake.VolumeSettings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: 5 * time.Millisecond,
+		Settings: nomadfake.Settings(), Volume: nomadfake.VolumeSettings(), Version: "0.7.1", Timeout: 10 * time.Minute, Poll: poll,
 	})
 	if err != nil {
 		t.Fatal(err)

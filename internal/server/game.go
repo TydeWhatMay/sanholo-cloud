@@ -245,6 +245,9 @@ func (a *App) gameDisconnect(c *fiber.Ctx) error {
 	switch {
 	case errors.Is(err, connect.ErrNotConnected):
 		return a.message(c, fiber.StatusConflict, "No change made", "No game account is connected.")
+	case errors.Is(err, connect.ErrLockTimeout):
+		return a.message(c, fiber.StatusServiceUnavailable, "Try again in a minute",
+			"Your bot is being started or changed right now. Nothing was changed.")
 	case errors.Is(err, connect.ErrStopFailed):
 		return a.message(c, fiber.StatusBadGateway, "Not disconnected",
 			"SanHolo could not stop your bot. Nothing was changed. Try again in a few minutes.")

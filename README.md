@@ -238,9 +238,14 @@ crash; the soak then starts over instead of failing the update. A canary that
 halts a rollout for any reason is recorded as unhealthy. When the canary gate
 holds a release back, the log says so (at most every ten minutes) and the
 admin releases page shows the tenant and the time the gate opens by itself. The
-operator can override it for a release, audited (`release override-canary
-<version>`, or the button on the page); abandoning the rollout clears the
-override.
+operator can override it for a release that is held right now (available or
+rolling), audited (`release override-canary <version>`, or the button, which is
+shown only then). The override is good for one decision: starting, resuming,
+completing or abandoning the rollout spends it. The soak starts over at most
+three times for restarts the control plane asked for; the fourth fails the
+update, so a bot that keeps crashing cannot be hidden behind reconnects. A
+disconnect waits at most 30 seconds for the tenant's lock and then asks the
+customer to try again.
 
 The reconcile worker also keeps each running instance in line with what the
 control plane expects, without fighting the updater: a job whose spec differs

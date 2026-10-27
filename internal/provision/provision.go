@@ -16,9 +16,11 @@ package provision
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 	"time"
 
@@ -59,6 +61,7 @@ const (
 	ReasonSoakCheck    = "a health check failed after the update"
 	ReasonSoakRestart  = "the bot restarted after the update"
 	ReasonSoakReplaced = "Nomad replaced the bot's allocation after the update"
+	ReasonSoakChurn    = "the bot was restarted too often during the update"
 )
 
 var (
@@ -367,8 +370,32 @@ func (s *Service) register(ctx context.Context, tenantID string, job nomad.Job, 
 	return nil
 }
 
-// lockRetry is how long a caller waits before trying a tenant's lock again.
-const lockRetry = 20 * time.Millisecond
+// Waiting for a tenant's lock backs off from 20 ms to 250 ms, with jitter, so
+// waiters do not hammer the database nor retry in step.
+const (
+	lockRetryMin = 20 * time.Millisecond
+	lockRetryMax = 250 * time.Millisecond
+)
+
+// lockDelay is the wait before attempt n+1: between half and all of
+// min(lockRetryMax, lockRetryMin * 1.6^n).
+func lockDelay(n int) time.Duration {
+	d := float64(lockRetryMin)
+	for range n {
+		d *= 1.6
+		if d >= float64(lockRetryMax) {
+			d = float64(lockRetryMax)
+			break
+		}
+	}
+	// Jitter needs no strong randomness, but a source that is not math/rand
+	// keeps the security scan quiet without an exception.
+	frac := 0.5
+	if n, err := rand.Int(rand.Reader, big.NewInt(1000)); err == nil {
+		frac = float64(n.Int64()) / 1000
+	}
+	return time.Duration(d * (0.5 + frac/2))
+}
 
 // lockTenant serialises the operations that register or change a tenant's
 // job (start, update, restart, stop), across processes: a Start that read the
@@ -385,7 +412,7 @@ const lockRetry = 20 * time.Millisecond
 // tries again shortly. A tenant whose holder is slow therefore costs the
 // others nothing but that one slot.
 func (s *Service) lockTenant(ctx context.Context, tenantID string) (unlock func(), err error) {
-	for {
+	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -396,7 +423,7 @@ func (s *Service) lockTenant(ctx context.Context, tenantID string) (unlock func(
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(lockRetry):
+		case <-time.After(lockDelay(attempt)):
 		}
 	}
 }

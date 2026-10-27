@@ -125,6 +125,13 @@ func (s *Service) StartTx(ctx context.Context, tx pgx.Tx, version string) (Summa
 	if recent && !rel.CanaryOverride {
 		return sum, ErrCanaryUnhealthy
 	}
+	// An override is good for one decision. Used (or not needed) it is spent,
+	// so it cannot waive a later gate without a new audit row.
+	if rel.CanaryOverride {
+		if _, err := tx.Exec(ctx, `UPDATE releases SET canary_override = false WHERE version = $1`, rel.Version); err != nil {
+			return sum, fmt.Errorf("updater: start: %w", err)
+		}
+	}
 	return sum, nil
 }
 
@@ -205,7 +212,7 @@ func (s *Service) ResumeTx(ctx context.Context, tx pgx.Tx) (Release, error) {
 		return rel, fmt.Errorf("updater: resume: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE releases SET state = 'rolling', halted_tenant = '', halt_reason = '', updated_at = $2 WHERE version = $1`,
+		UPDATE releases SET state = 'rolling', halted_tenant = '', halt_reason = '', canary_override = false, updated_at = $2 WHERE version = $1`,
 		rel.Version, s.now()); err != nil {
 		return rel, fmt.Errorf("updater: resume: %w", err)
 	}
@@ -255,26 +262,34 @@ func (s *Service) lockHalted(ctx context.Context, tx pgx.Tx) (Release, error) {
 }
 
 // OverrideCanaryTx lets the release proceed although the canary tenant was
-// unhealthy in the last hour: it is started, or completed, regardless of the
-// gate. The caller writes the audit row in the same transaction. It is
-// cleared when a rollout is abandoned. ErrNotFound: no such release;
-// ErrState: it is done.
+// unhealthy in the last hour. It is good for one decision: it is spent when
+// the rollout starts, resumes, completes or is abandoned. The caller writes
+// the audit row in the same transaction.
+//
+// It applies to a release that is available or rolling and held by the gate
+// right now, which is when the admin page offers it. ErrNotFound: no such
+// release; ErrState: the release is done or halted, or nothing holds it.
 func (s *Service) OverrideCanaryTx(ctx context.Context, tx pgx.Tx, version string) error {
-	tag, err := tx.Exec(ctx, `UPDATE releases SET canary_override = true, updated_at = $2 WHERE version = $1 AND state <> 'done'`, version, s.now())
-	if err != nil {
-		return fmt.Errorf("updater: override: %w", err)
-	}
-	if tag.RowsAffected() == 1 {
-		return nil
-	}
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM releases WHERE version = $1)`, version).Scan(&exists); err != nil {
-		return fmt.Errorf("updater: override: %w", err)
-	}
-	if !exists {
+	rel, err := scanRelease(tx.QueryRow(ctx, `SELECT `+releaseCols+` FROM releases WHERE version = $1 FOR UPDATE`, version))
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		return ErrNotFound
+	case err != nil:
+		return fmt.Errorf("updater: override: %w", err)
+	case rel.State != StateAvailable && rel.State != StateRolling:
+		return ErrState
 	}
-	return ErrState
+	hold, err := canaryHold(ctx, tx, rel, s.now())
+	if err != nil {
+		return err
+	}
+	if hold == nil {
+		return ErrState
+	}
+	if _, err := tx.Exec(ctx, `UPDATE releases SET canary_override = true, updated_at = $2 WHERE version = $1`, version, s.now()); err != nil {
+		return fmt.Errorf("updater: override: %w", err)
+	}
+	return nil
 }
 
 // Hold says why a release cannot start or complete yet.
@@ -285,20 +300,38 @@ type Hold struct {
 	Until  time.Time
 }
 
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // CanaryHold reports the canary gate for a release that is not done, nil when
 // it is open or overridden.
 func (s *Service) CanaryHold(ctx context.Context, rel Release) (*Hold, error) {
 	if rel.CanaryOverride || rel.State == StateDone {
 		return nil, nil
 	}
+	return canaryHold(ctx, s.pool, rel, s.now())
+}
+
+// canaryHold is the gate itself: the marked canary tenant, the tenant that
+// was batch 0 of the rollout, and, for a release not started yet, the tenant
+// the plan would pick (the oldest running one that has to move), if it was
+// unhealthy within CanaryGate.
+func canaryHold(ctx context.Context, q rowQuerier, rel Release, now time.Time) (*Hold, error) {
 	var h Hold
 	var at time.Time
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT i.tenant_id, i.last_unhealthy_at FROM tenant_instances i
 		WHERE i.last_unhealthy_at > $2
 		  AND (i.tenant_id IN (SELECT id FROM tenants WHERE is_canary)
-		       OR i.tenant_id IN (SELECT tenant_id FROM rollout_tenants WHERE release_version = $1 AND batch = 0))
-		ORDER BY i.last_unhealthy_at DESC LIMIT 1`, rel.Version, s.now().Add(-CanaryGate)).Scan(&h.Tenant, &at)
+		       OR i.tenant_id IN (SELECT tenant_id FROM rollout_tenants WHERE release_version = $1 AND batch = 0)
+		       OR ($3 AND i.tenant_id = (
+		           SELECT i2.tenant_id FROM tenant_instances i2 JOIN tenants t2 ON t2.id = i2.tenant_id
+		           WHERE i2.state = 'running' AND t2.status IN ('pending', 'active')
+		             AND (i2.image_version <> $1 OR i2.image_digest <> $4)
+		           ORDER BY t2.created_at, t2.id LIMIT 1)))
+		ORDER BY i.last_unhealthy_at DESC LIMIT 1`,
+		rel.Version, now.Add(-CanaryGate), rel.State == StateAvailable, rel.Digest).Scan(&h.Tenant, &at)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

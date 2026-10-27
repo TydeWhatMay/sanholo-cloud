@@ -53,9 +53,11 @@ type Service struct {
 	sec  *secrets.Client
 	game *game.Client
 	prov *provision.Service
-	log  *slog.Logger
-	now  func() time.Time
-	pend *pendingStore
+	// lockWait is how long a disconnect waits for the tenant's lock.
+	lockWait time.Duration
+	log      *slog.Logger
+	now      func() time.Time
+	pend     *pendingStore
 }
 
 // New returns a Service. maxPerTenant is BETA_MAX_GAME_ACCOUNTS_PER_TENANT:
@@ -69,7 +71,7 @@ func New(pool *pgxpool.Pool, sec *secrets.Client, gc *game.Client, log *slog.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	s := &Service{pool: pool, sec: sec, game: gc, log: log, now: time.Now}
+	s := &Service{pool: pool, sec: sec, game: gc, log: log, now: time.Now, lockWait: 30 * time.Second}
 	s.pend = newPendingStore(func() time.Time { return s.now() })
 	return s, nil
 }
@@ -297,3 +299,7 @@ func (s *Service) Get(ctx context.Context, tenantID string) (*Connected, error) 
 	}
 	return &c, nil
 }
+
+// SetLockWait replaces how long a disconnect waits for the tenant's lock
+// (tests).
+func (s *Service) SetLockWait(d time.Duration) { s.lockWait = d }

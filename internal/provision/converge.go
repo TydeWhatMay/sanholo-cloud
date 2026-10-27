@@ -103,15 +103,6 @@ func (s *Service) auditConverge(ctx context.Context, tenantID, from, to string, 
 	}
 }
 
-// MarkUnhealthy records that the instance was seen unhealthy now (the
-// updater does it when a soak fails).
-func (s *Service) MarkUnhealthy(ctx context.Context, tenantID string) {
-	if _, err := s.pool.Exec(context.WithoutCancel(ctx),
-		`UPDATE tenant_instances SET last_unhealthy_at = $2 WHERE tenant_id = $1`, tenantID, s.now()); err != nil {
-		s.log.Error("provision: could not record an unhealthy reading", "tenant", tenantID, "error", err)
-	}
-}
-
 // SoakBase is the allocation and restart count an update's soak starts from.
 type SoakBase struct {
 	AllocID  string

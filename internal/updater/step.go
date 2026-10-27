@@ -228,7 +228,7 @@ func (s *Service) soakStep(ctx context.Context, rel Release, r Row) (halted bool
 	// restart), and Nomad counts those like crashes. A restart it asked for
 	// since the baseline is not the update's fault: the soak starts over.
 	if s.restartedSince(ctx, r) {
-		return false, s.rebaseline(ctx, rel, r)
+		return s.absorbRestart(ctx, rel, r)
 	}
 	verdict, cerr := s.prov.CheckSoak(ctx, r.TenantID, provision.SoakBase{AllocID: r.SoakAlloc, Restarts: r.SoakRestarts})
 	switch {
@@ -240,7 +240,7 @@ func (s *Service) soakStep(ctx context.Context, rel Release, r Row) (halted bool
 		// Asked for after the read above and before the check: the request is
 		// recorded before Nomad is asked, so it is visible by now.
 		if s.restartedSince(ctx, r) {
-			return false, s.rebaseline(ctx, rel, r)
+			return s.absorbRestart(ctx, rel, r)
 		}
 		return true, s.halt(ctx, rel, r, provision.SoakReason(verdict))
 	case now.Sub(*r.SoakStartedAt) >= d:
@@ -260,13 +260,28 @@ func (s *Service) restartedSince(ctx context.Context, r Row) bool {
 	return err == nil && inst != nil && inst.RestartRequestedAt != nil && inst.RestartRequestedAt.After(*r.SoakStartedAt)
 }
 
+// maxRebaselines is how often a row's soak may be started over because the
+// control plane restarted the bot. A customer who keeps reconnecting could
+// otherwise hide a crash loop; Nomad's count cannot tell the restarts apart, so
+// the number of absorbed restarts is capped instead.
+const maxRebaselines = 3
+
+// absorbRestart starts the soak over after a restart the control plane asked
+// for, or halts the rollout when that has happened too often.
+func (s *Service) absorbRestart(ctx context.Context, rel Release, r Row) (halted bool, err error) {
+	if r.Rebaselines >= maxRebaselines {
+		return true, s.halt(ctx, rel, r, provision.ReasonSoakChurn)
+	}
+	return false, s.rebaseline(ctx, rel, r)
+}
+
 // rebaseline throws the soak away so the next pass takes a new baseline and
 // starts the clock again, and gives the tenant a fresh window to become
 // healthy again.
 func (s *Service) rebaseline(ctx context.Context, rel Release, r Row) error {
 	now := s.now()
 	_, err := s.pool.Exec(ctx, `
-		UPDATE rollout_tenants SET soak_started_at = NULL, soak_alloc = '', soak_restarts = 0, started_at = $3, updated_at = $3
+		UPDATE rollout_tenants SET soak_started_at = NULL, soak_alloc = '', soak_restarts = 0, rebaselines = rebaselines + 1, started_at = $3, updated_at = $3
 		WHERE release_version = $1 AND tenant_id = $2 AND state = 'updating'`, rel.Version, r.TenantID, now)
 	if err != nil {
 		return fmt.Errorf("updater: restart the soak: %w", err)
@@ -281,12 +296,6 @@ func (s *Service) rebaseline(ctx context.Context, rel Release, r Row) error {
 func (s *Service) halt(ctx context.Context, rel Release, r Row, reason string) error {
 	ctx = context.WithoutCancel(ctx)
 	now := s.now()
-	// A canary that fails for any reason (soak, timeout, failed or reverted
-	// deployment, refused registration) holds the next rollout back for an
-	// hour.
-	if r.Batch == 0 {
-		s.prov.MarkUnhealthy(ctx, r.TenantID)
-	}
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var state string
 		if err := tx.QueryRow(ctx, `SELECT state FROM releases WHERE version = $1 FOR UPDATE`, rel.Version).Scan(&state); err != nil {
@@ -303,6 +312,14 @@ func (s *Service) halt(ctx context.Context, rel Release, r Row, reason string) e
 		}
 		if tag.RowsAffected() != 1 {
 			return nil
+		}
+		// A canary that fails for any reason (soak, timeout, failed or
+		// reverted deployment, refused registration) holds the next rollout
+		// back for an hour. Only a halt that took effect counts.
+		if r.Batch == 0 {
+			if _, err := tx.Exec(ctx, `UPDATE tenant_instances SET last_unhealthy_at = $2 WHERE tenant_id = $1`, r.TenantID, now); err != nil {
+				return fmt.Errorf("updater: halt: %w", err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE rollout_tenants SET state = 'revert_pending', reason = $3, started_at = $4, updated_at = $4
@@ -420,7 +437,7 @@ func (s *Service) finish(ctx context.Context, rel Release) error {
 			return fmt.Errorf("updater: finish: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE releases SET state = 'done', is_target = true, finished_at = $2, updated_at = $2 WHERE version = $1`, rel.Version, now); err != nil {
+			UPDATE releases SET state = 'done', is_target = true, finished_at = $2, canary_override = false, updated_at = $2 WHERE version = $1`, rel.Version, now); err != nil {
 			return fmt.Errorf("updater: finish: %w", err)
 		}
 		var done, skipped int

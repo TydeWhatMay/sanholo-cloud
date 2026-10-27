@@ -112,6 +112,15 @@ func TestReleaseOverrideCanaryCommand(t *testing.T) {
 	if err := run("add", "0.8.0"); err != nil {
 		t.Fatal(err)
 	}
+	if err := run("override-canary", "v0.8.0"); err == nil {
+		t.Fatal("an override was accepted although nothing holds the release")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, status, is_canary) VALUES ('acme', 'active', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO tenant_instances (tenant_id, job_id, image_version, state, last_unhealthy_at) VALUES ('acme', 'sanholo-tenant-acme', '0.7.1', 'running', now() - interval '5 minutes')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := run("override-canary", "v0.8.0"); err != nil || !strings.Contains(out.String(), "overridden") {
 		t.Fatalf("override: %v %q", err, out.String())
 	}

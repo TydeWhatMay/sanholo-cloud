@@ -229,6 +229,12 @@ func TestAdminReleasesPageShowsTheCanaryGateAndOverrides(t *testing.T) {
 	if r := op.post("/admin/releases/add", url.Values{"version": {"0.8.0"}}); r.status != 303 {
 		t.Fatalf("add: %d", r.status)
 	}
+	if strings.Contains(op.get("/admin/releases", nil).body, "override-canary") {
+		t.Error("the override is offered although nothing holds the release")
+	}
+	if r := op.post("/admin/releases/0.8.0/override-canary", nil); r.status != 409 {
+		t.Errorf("override with nothing holding the release = %d, want 409", r.status)
+	}
 	if _, err := e.pool.Exec(ctx, `INSERT INTO tenants (id, status, is_canary) VALUES ('acme', 'active', true)`); err != nil {
 		t.Fatal(err)
 	}

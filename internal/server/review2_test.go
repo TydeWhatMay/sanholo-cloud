@@ -32,16 +32,27 @@ func (p *provEnv) disconnectedWithPendingPurge(t *testing.T) (c *client, tenant 
 // polling for an instance that was gone, so the tenant stayed "in flight" and
 // the next connect started nothing.
 func TestDisconnectWhileAStartIsSupervisedLeavesTheTenantStartable(t *testing.T) {
-	p := newProvEnv(t)
+	// A slow poll: the follower sleeps through the whole disconnect (the stop
+	// and the deletion of the instance row) and wakes to find the instance
+	// gone. With a fast poll it would see "stopped" first and end for another
+	// reason.
+	p := newProvEnvPoll(t, time.Second)
 	c, tenant := p.user(t, "ann@example.org")
 	job := "sanholo-tenant-" + tenant
-	connectGame(t, c, tokenA) // the bot stays pending: the follower is polling
+	connectGame(t, c, tokenA) // the bot stays pending in Nomad: the follower is polling
 	eventually(t, "the job", func() bool { e, _ := p.fake.Has(job); return e })
 	if r := c.post("/account/game/disconnect", nil); r.status != 200 {
 		t.Fatalf("disconnect: %d %s", r.status, r.body)
 	}
 	if exists, _ := p.fake.Has(job); exists {
 		t.Fatal("setup: the job survived the disconnect")
+	}
+	followerGone := make(chan struct{})
+	go func() { p.prov.Wait(); close(followerGone) }()
+	select {
+	case <-followerGone:
+	case <-time.After(4 * time.Second):
+		t.Fatal("the follower of the start kept polling an instance that was gone")
 	}
 	connectGame(t, c, tokenA)
 	eventually(t, "a new job after the second connect", func() bool { e, _ := p.fake.Has(job); return e })
@@ -324,5 +335,75 @@ func TestAnotherAccountDoesNotInheritAPendingVolume(t *testing.T) {
 	}
 	if len(p.fake.Volumes()) != 1 {
 		t.Errorf("volumes = %v, want only the new one", p.fake.Volumes())
+	}
+}
+
+// A disconnect that cannot get the tenant's lock in time says so and changes
+// nothing, instead of waiting for ever.
+func TestDisconnectGivesUpWhenTheTenantIsBusy(t *testing.T) {
+	p := newProvEnv(t)
+	c, tenant, job := p.connected(t)
+	p.conn.SetLockWait(300 * time.Millisecond)
+	unlock, err := p.prov.LockTenant(context.Background(), tenant) // a long start or update
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unlockOnce sync.Once
+	release := func() { unlockOnce.Do(unlock) }
+	t.Cleanup(release)
+	start := time.Now()
+	answer := make(chan result, 1)
+	go func() { answer <- c.post("/account/game/disconnect", nil) }()
+	var r result
+	select {
+	case r = <-answer:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the disconnect kept waiting for the tenant's lock")
+	}
+	if r.status != 503 || !strings.Contains(r.body, "Try again in a minute") || time.Since(start) > 5*time.Second {
+		t.Fatalf("disconnect while busy: %d after %v: %s", r.status, time.Since(start), r.body)
+	}
+	if rows(t, p.pool, `SELECT count(*) FROM game_accounts WHERE tenant_id = $1`, tenant) != 1 || p.fake.Count("DELETE", "/v1/job/") != 0 {
+		t.Error("a disconnect that gave up changed something")
+	}
+	release()
+	if r := c.post("/account/game/disconnect", nil); r.status != 200 {
+		t.Fatalf("disconnect after the lock was free: %d", r.status)
+	}
+	if exists, _ := p.fake.Has(job); exists {
+		t.Error("the job survived")
+	}
+}
+
+// Volume deletions for tenants that are connected again but have not started
+// yet are not due on every pass; they must not take the batch from the
+// deletions that are.
+func TestVolumeRowsOfReconnectedTenantsDoNotTakeBatchSlots(t *testing.T) {
+	p := newProvEnv(t)
+	c, tenant, _ := p.connected(t)
+	ctx := context.Background()
+	p.fake.Override(func(r nomadfake.Request) (int, string, bool) {
+		return 503, "", r.Method == "DELETE" && strings.HasPrefix(r.Path, "/v1/volume/host/")
+	})
+	if r := c.post("/account/game/disconnect", nil); r.status != 200 {
+		t.Fatalf("disconnect: %d", r.status)
+	}
+	p.fake.Override(nil)
+	for i := range 150 {
+		id := fmt.Sprintf("back-%03d", i)
+		if _, err := p.pool.Exec(ctx, `INSERT INTO tenants (id, status) VALUES ($1, 'active')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.pool.Exec(ctx, `INSERT INTO game_accounts (tenant_id, game_account_id, replicant_name, replicant_code) VALUES ($1, $2, 'R', 'AAAA1111')`, id, "replicant:"+id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.pool.Exec(ctx, `INSERT INTO pending_cleanups (tenant_key, kind, requested_at) VALUES ($1, 'volume', '2020-01-01')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.clock.advance(2 * time.Minute)
+	p.conn.RetryCleanups(ctx)
+	if len(p.fake.Volumes()) != 0 {
+		t.Errorf("the due volume deletion of %s waited behind rows that are not due: %v", tenant, p.fake.Volumes())
 	}
 }

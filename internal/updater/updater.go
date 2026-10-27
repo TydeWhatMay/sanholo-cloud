@@ -182,6 +182,9 @@ type Row struct {
 	SoakStartedAt *time.Time
 	SoakAlloc     string
 	SoakRestarts  int
+	// Rebaselines counts the times the soak was started over because the
+	// control plane restarted the bot.
+	Rebaselines int
 }
 
 const releaseCols = `version, coalesce(digest, ''), notes, url, state, is_target, batch_size, halted_tenant, halt_reason, created_at, started_at, finished_at, canary_override`
@@ -192,11 +195,11 @@ func scanRelease(row pgx.Row) (Release, error) {
 	return r, err
 }
 
-const rowCols = `release_version, tenant_id, batch, state, reason, previous_version, previous_digest, started_at, updated_at, soak_started_at, soak_alloc, soak_restarts`
+const rowCols = `release_version, tenant_id, batch, state, reason, previous_version, previous_digest, started_at, updated_at, soak_started_at, soak_alloc, soak_restarts, rebaselines`
 
 func scanRow(row pgx.Row) (Row, error) {
 	var r Row
-	err := row.Scan(&r.Version, &r.TenantID, &r.Batch, &r.State, &r.Reason, &r.PreviousVersion, &r.PreviousDigest, &r.StartedAt, &r.UpdatedAt, &r.SoakStartedAt, &r.SoakAlloc, &r.SoakRestarts)
+	err := row.Scan(&r.Version, &r.TenantID, &r.Batch, &r.State, &r.Reason, &r.PreviousVersion, &r.PreviousDigest, &r.StartedAt, &r.UpdatedAt, &r.SoakStartedAt, &r.SoakAlloc, &r.SoakRestarts, &r.Rebaselines)
 	return r, err
 }
 

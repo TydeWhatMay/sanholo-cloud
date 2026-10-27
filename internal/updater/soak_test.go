@@ -397,3 +397,141 @@ func TestAHeldReleaseIsLoggedOnceInAWhile(t *testing.T) {
 		t.Errorf("%d log lines after eleven minutes, want 2", n)
 	}
 }
+
+// An override is good for one decision.
+func TestAnOverrideIsSpentWhenTheRolloutStartsAndCompletes(t *testing.T) {
+	e := newEnv(t, 5)
+	e.tenants(t, "t01")
+	e.release(t, "0.8.0", "")
+	if err := e.tx(t, func(tx pgx.Tx) error { return e.upd.SetCanaryTx(context.Background(), tx, "t01") }); err != nil {
+		t.Fatal(err)
+	}
+	e.markUnhealthy(t, "t01", 5*time.Minute)
+	e.override(t, "0.8.0")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	if e.release1(t, "0.8.0").CanaryOverride {
+		t.Fatal("the override is still set after it let the rollout start")
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 3)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateRolling {
+		t.Fatalf("release = %+v: the spent override let it complete past the gate", r)
+	}
+	e.override(t, "0.8.0") // a new decision, a new audit row in the real flow
+	e.step(t, 1)
+	r := e.release1(t, "0.8.0")
+	if r.State != updater.StateDone || r.CanaryOverride {
+		t.Fatalf("release = %+v, want done with the override spent", r)
+	}
+	// Starting the done release again is gated afresh.
+	e.markUnhealthy(t, "t01", 5*time.Minute)
+	if err := e.start(t, "0.8.0"); !errors.Is(err, updater.ErrCanaryUnhealthy) {
+		t.Fatalf("restart of a done release = %v, want ErrCanaryUnhealthy", err)
+	}
+}
+
+func TestAnOverrideDoesNotSurviveAHaltAndAResume(t *testing.T) {
+	e := newEnv(t, 1)
+	e.tenants(t, "t01", "t02")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 2) // canary done, batch 1 (t02) begins
+	e.markUnhealthy(t, "t01", 5*time.Minute)
+	e.override(t, "0.8.0") // rolling, held by the canary gate
+	e.fake.SetPhase(job("t02"), nomadfake.Failed)
+	e.step(t, 1)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateHalted {
+		t.Fatalf("release = %+v, want halted", r)
+	}
+	e.healthy("t02")
+	e.step(t, 2) // the revert of t02 completes
+	if err := e.resume(t); err != nil {
+		t.Fatal(err)
+	}
+	if e.release1(t, "0.8.0").CanaryOverride {
+		t.Fatal("the override survived a resume")
+	}
+	e.step(t, 1)
+	e.healthy("t02")
+	e.step(t, 6)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateRolling {
+		t.Fatalf("release = %+v: it completed past the gate on an override from before the halt", r)
+	}
+}
+
+func TestTheOverrideAppliesOnlyToAHeldAvailableOrRollingRelease(t *testing.T) {
+	e := newEnv(t, 5)
+	e.tenants(t, "t01", "t02")
+	e.release(t, "0.8.0", "")
+	try := func() error {
+		return e.tx(t, func(tx pgx.Tx) error { return e.upd.OverrideCanaryTx(context.Background(), tx, "0.8.0") })
+	}
+	if err := try(); !errors.Is(err, updater.ErrState) {
+		t.Fatalf("override with nothing holding the release = %v, want ErrState", err)
+	}
+	// The tenant the plan would pick is the oldest one; it counts although no
+	// canary is marked.
+	e.markUnhealthy(t, "t01", 5*time.Minute)
+	if err := try(); err != nil {
+		t.Fatalf("override of a release held by the tenant the plan would pick: %v", err)
+	}
+	// Held by a marked canary, a halted release is still not overridable (the
+	// page does not offer it), nor is a done one.
+	if err := e.tx(t, func(tx pgx.Tx) error { return e.upd.SetCanaryTx(context.Background(), tx, "t01") }); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"halted", "done"} {
+		if _, err := e.pool.Exec(context.Background(), `UPDATE releases SET canary_override = false, state = $1, halted_tenant = 't01' WHERE version = '0.8.0'`, state); err != nil {
+			t.Fatal(err)
+		}
+		if err := try(); !errors.Is(err, updater.ErrState) {
+			t.Errorf("override of a %s release = %v, want ErrState", state, err)
+		}
+	}
+}
+
+// A customer who keeps restarting their bot must not hide a crash loop: the
+// soak starts over a few times, then the update fails.
+func TestTheSoakIsOnlyStartedOverAFewTimes(t *testing.T) {
+	e := withSoak(newEnv(t, 1))
+	e.tenants(t, "t01")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 1)
+	restart := func() {
+		t.Helper()
+		e.advance(time.Minute)
+		if err := e.prov.Restart(context.Background(), "t01"); err != nil {
+			t.Fatal(err)
+		}
+		e.prov.Wait()
+	}
+	for i := 1; i <= 3; i++ {
+		restart()
+		e.step(t, 1) // absorbed: the soak starts over
+		if r := e.release1(t, "0.8.0"); r.State != updater.StateRolling {
+			t.Fatalf("restart %d halted the rollout: %+v", i, r)
+		}
+		if got := e.row(t, "0.8.0", "t01").Rebaselines; got != i {
+			t.Fatalf("after restart %d the row counts %d", i, got)
+		}
+		e.step(t, 1) // new baseline
+	}
+	restart()
+	e.step(t, 1)
+	r := e.release1(t, "0.8.0")
+	if r.State != updater.StateHalted || r.HaltReason != provision.ReasonSoakChurn {
+		t.Fatalf("release = %+v, want halted for %q", r, provision.ReasonSoakChurn)
+	}
+}

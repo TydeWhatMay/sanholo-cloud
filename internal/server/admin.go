@@ -224,12 +224,14 @@ func (a *App) adminReleases(c *fiber.Ctx) error {
 			CanStart: r.State == updater.StateAvailable || r.State == updater.StateDone,
 			Halted:   r.State == updater.StateHalted, HaltedTenant: r.HaltedTenant, HaltReason: r.HaltReason,
 		}
-		if hold, err := a.Admin.CanaryHold(c.UserContext(), r); err != nil {
+		hold, err := a.Admin.CanaryHold(c.UserContext(), r)
+		if err != nil {
 			return a.serverError(c)
-		} else if hold != nil {
+		}
+		if hold != nil {
 			row.Hold = "Held by the canary gate: tenant " + hold.Tenant + " was unhealthy in the last hour. It opens at " + hold.Until.UTC().Format(timeFmt) + "."
 		}
-		row.CanOverride = r.State != updater.StateDone && r.State != updater.StateHalted
+		row.CanOverride = hold != nil && (r.State == updater.StateAvailable || r.State == updater.StateRolling)
 		if r.IsTarget {
 			target = "v" + r.Version
 		}

@@ -578,8 +578,10 @@ func TestWaitersForOneTenantDoNotStarveTheOthers(t *testing.T) {
 	g := holdFirstRegistration(e)
 	var once sync.Once
 	letGo := func() { once.Do(func() { close(g.release) }) }
-	t.Cleanup(letGo) // a failing test must not leave the holder blocked
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	// A failing test must not leave the holder blocked or the waiters
+	// waiting: release the one, cancel the others.
+	t.Cleanup(func() { cancel(); letGo() })
 	go func() { _ = svc.Start(ctx, "acme") }() // holds acme and one slot
 	<-g.reached
 	for range 3 { // three more callers for acme, all waiting

@@ -19,6 +19,10 @@ var (
 	// ErrStopFailed: Nomad did not stop the bot. Nothing was changed; the
 	// customer can try again.
 	ErrStopFailed = errors.New("the bot could not be stopped")
+	// ErrLockTimeout: the bot is being started or changed right now and the
+	// disconnect could not get the tenant's lock in time. Nothing was
+	// changed; try again.
+	ErrLockTimeout = errors.New("the bot is busy")
 )
 
 // Cleanup kinds (pending_cleanups.kind).
@@ -77,7 +81,12 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 	// is deleted. Lock order: this lock, then the tenants row.
 	unlock := func() {}
 	if s.prov.Enabled() {
-		u, err := s.prov.LockTenant(ctx, tenantID)
+		lctx, cancel := context.WithTimeout(ctx, s.lockWait)
+		u, err := s.prov.LockTenant(lctx, tenantID)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return out, ErrLockTimeout
+		}
 		if err != nil {
 			s.log.Warn("connect: could not lock the tenant", "tenant", tenantID, "error", err)
 			return out, ErrStopFailed
@@ -257,6 +266,7 @@ func (s *Service) RetryCleanups(ctx context.Context) int {
 		}
 		rows, err := s.pool.Query(ctx, `
 			SELECT tenant_key FROM pending_cleanups WHERE kind = $1 AND `+cleanupDue+`
+			  AND NOT (kind = 'volume' AND EXISTS (SELECT 1 FROM game_accounts g WHERE g.tenant_id = tenant_key))
 			ORDER BY last_attempt_at NULLS FIRST, requested_at, tenant_key LIMIT 100`, kind, s.now())
 		if err != nil {
 			s.log.Error("connect: pending deletions", "kind", kind, "error", err)
