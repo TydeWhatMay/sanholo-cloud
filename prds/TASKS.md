@@ -22,7 +22,7 @@ External dependencies, and how each phase copes with them:
 | 1.3 | US-010 sign-in part 1: magic link (15 min, single use, no enumeration, no existence-dependent work), server-side revocable sessions (host-only cookie on app.), rate limits keyed correctly behind the edge, AhaSend client (fake in tests). | [prd](backlog/prd-sanholo-saas.md) | DONE | needs 1.1 |
 | 1.3b | US-010 sign-in part 2: passkeys (WebAuthn register, sign in, delete). | [prd](backlog/prd-sanholo-saas.md) | DONE | with 1.4 |
 | 1.4 | US-020 admin skeleton (needs 1.3b): operator accounts with passkey required, tenant list, audit table for every admin action; no path to a token. | [prd](backlog/prd-sanholo-saas.md) | DONE | needs 1.3 |
-| 1.5 | US-024 privacy notice, beta terms, imprint in the company register; CSP with no third-party scripts (test). | [prd](backlog/prd-sanholo-saas.md) | TODO | copy via the voice skill (Register 2) |
+| 1.5 | US-024 privacy notice, beta terms, imprint in the company register; CSP with no third-party scripts (test). | [prd](backlog/prd-sanholo-saas.md) | DONE | copy via the voice skill (Register 2) |
 
 ## Phase 2: Tenants — secrets, onboarding, provisioning, proxy, updater (fakes for qm and Nomad)
 
@@ -43,4 +43,4 @@ External dependencies, and how each phase copes with them:
 | 3.3 | US-018 delete account with schema-derived verification (no rows, no qm path, no volume). | [prd](backlog/prd-sanholo-saas.md) | TODO | needs 3.2 |
 | 3.4 | US-022 backups and restore runbook, US-023 monitoring and operator alerts (deploy/ + docs); coordinate with the infra session. | [prd](backlog/prd-sanholo-saas.md) | TODO | infra |
 | 3.5 | US-013 / US-014 isolation tests for staging (tenant A cannot reach B; A's identity cannot read B's secret). | [prd](backlog/prd-sanholo-saas.md) | TODO | needs staging |
-| 3.6 | US-025 launch checklist document. | [prd](backlog/prd-sanholo-saas.md) | TODO | last |
+| 3.6 | US-025 launch checklist document. Includes: re-check `templates/privacy.html` against the deployed system (log retention placeholder, processor list incl. any edge/CDN, backup location, export and delete as built), and legal review of terms and privacy. | [prd](backlog/prd-sanholo-saas.md) | TODO | last |

@@ -200,6 +200,11 @@ func (s *Service) Redeem(ctx context.Context, code string) (tenantID string, err
 	if _, err := tx.Exec(ctx, `UPDATE invites SET used_at = $2 WHERE code_hash = $1`, HashSecret(code), now); err != nil {
 		return "", fmt.Errorf("auth: redeem: mark used: %w", err)
 	}
+	// The waiting-list entry has done its job; the privacy notice says it
+	// goes when the account is created.
+	if _, err := tx.Exec(ctx, `DELETE FROM waitlist WHERE lower(email) = lower($1)`, email); err != nil {
+		return "", fmt.Errorf("auth: redeem: waitlist: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", fmt.Errorf("auth: redeem: commit: %w", err)
 	}

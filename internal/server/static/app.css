@@ -12,3 +12,6 @@ a { color: var(--accent); }
 table { border-collapse: collapse; width: 100%; }
 td, th { text-align: left; padding: 0.5rem 0.5rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 .muted { color: var(--muted); }
+h2 { font-size: 1.15rem; margin: 1.5rem 0 0.5rem; }
+h3 { font-size: 1rem; margin: 1rem 0 0.5rem; }
+footer { max-width: 36rem; margin: 0 auto; padding: 1rem 16px 2rem; border-top: 1px solid var(--line); font-size: 0.9rem; }

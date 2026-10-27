@@ -1,0 +1,83 @@
+<h1>Privacy notice</h1>
+<p class="muted">Last updated: 27 October 2026</p>
+
+<p>This notice covers SanHolo Hosted at sanholo.space: the sign-up and account pages, and the SanHolo instance run for each account.</p>
+
+<h2>Controller</h2>
+<p>TydeWhatMay is the data controller under the GDPR. TydeWhatMay is Lance Haig, trading as TydeWhatMay, Faelmannweg 12A, 14089 Berlin, Germany. Requests about your data go to <a href="mailto:hello@tydewhatmay.eu">hello@tydewhatmay.eu</a>.</p>
+
+<h2>What SanHolo Hosted stores</h2>
+
+<h3>Waiting list and invites</h3>
+<p>Your email address and the date you joined the waiting list. An invite stores your email address, its expiry date and a hash of the invite code. The code itself is not stored.</p>
+
+<h3>Your account</h3>
+<p>Your email address and the date the account was created. A hash of the address is stored beside it for sign-in lookups.</p>
+
+<h3>Signing in</h3>
+<ul>
+<li>A sign-in request stores only a hash of the email address entered.</li>
+<li>A sign-in link is stored as a hash of its token. It expires after 15 minutes and works once.</li>
+<li>Each signed-in session stores a hash of the session cookie, the browser's user agent text, how the session was opened (email link or passkey), and when it was created and last used. A session ends after 30 days, or earlier when you sign out or revoke it on the account page.</li>
+<li>A passkey stores its public key, its credential identifier, a signature counter and the dates it was added and last used. The private key stays on your device.</li>
+</ul>
+
+<h3>Your game account</h3>
+<p>To play for you, SanHolo needs your Replicant Space API token. The token is stored encrypted in a secrets store on SanHolo's servers. Only your own SanHolo instance can read it. The sign-up service can write and delete it but cannot read it back. The token is never written to the database, to logs or to the export.</p>
+<p>Your SanHolo instance stores the game state it reads from Replicant Space, the bot's activity log, your goals and settings, on a disk volume reserved for your account.</p>
+
+<h3>Notifications</h3>
+<p>If you turn on browser notifications, SanHolo stores the push subscription your browser provides. Notifications are delivered through the push service of your browser's vendor. Their content is encrypted end to end between SanHolo and your browser.</p>
+
+<h3>Email sent to you</h3>
+<p>Invites and sign-in links are queued before sending. A queued email, including its text, is deleted 7 days after it was sent or given up on.</p>
+
+<h3>Technical data</h3>
+<p>Rate limits on the waiting list, sign-in and passkey forms are keyed on your IP address and, for sign-in, on a hash of the email address entered. These records are deleted after 2 days.</p>
+<p>Server logs record the time, the page requested, the response status and the IP address of each request. They are kept for [log retention to be set at launch].</p>
+
+<h3>Administrator actions</h3>
+<p>Every action an administrator takes (issuing an invite, suspending an account) is recorded with the time and the administrator. An invite is recorded by a hash of the email address, not the address.</p>
+
+<h2>What SanHolo Hosted does not collect</h2>
+<p>SanHolo Hosted runs no analytics, no advertising and no third-party scripts. The pages load scripts and styles from sanholo.space only, and the content security policy refuses everything else. Data is not sold or shared for advertising.</p>
+
+<h2>Purposes and legal basis</h2>
+<ul>
+<li>Account, sign-in, your SanHolo instance and notifications: to provide the service you signed up for (Art. 6(1)(b) GDPR).</li>
+<li>Waiting list and invites: to let you into the beta at your request (Art. 6(1)(b) GDPR).</li>
+<li>Rate limits, server logs and the administrator record: to keep the service available and secure (Art. 6(1)(f) GDPR).</li>
+</ul>
+
+<h2>Processors and where data is held</h2>
+<table>
+<thead><tr><th>Processor</th><th>Purpose</th><th>Location</th></tr></thead>
+<tbody>
+<tr><td>Hetzner Online GmbH</td><td>Servers, disk volumes and backups</td><td>Germany</td></tr>
+<tr><td>AhaSend</td><td>Delivery of invite and sign-in email: your email address and the message</td><td>EU region</td></tr>
+</tbody>
+</table>
+<p>Replicant Space is a game run by a third party. SanHolo sends requests to Replicant Space with your API token, as the game client would. Your game account and what Replicant Space stores about it are covered by Replicant Space's own terms.</p>
+
+<h2>How long data is kept</h2>
+<ul>
+<li>Waiting list entry: until you are invited, or until you ask for it to be removed.</li>
+<li>Unused invite: until 14 days after it expires.</li>
+<li>Account, game token, instance volume and push subscriptions: until you delete your account or disconnect your game account.</li>
+<li>Sessions: 30 days at most.</li>
+<li>Sign-in links and requests: 1 day after use or expiry.</li>
+<li>Queued email: 7 days after sending.</li>
+<li>Rate-limit records: 2 days.</li>
+<li>Backups: encrypted nightly backups of the database and instance volumes are kept for 30 days. Data you delete remains in backups taken before the deletion until they expire, at most 30 days, and in the secrets store's internal log until it is compacted. A deleted account is not restored from a backup.</li>
+<li>Administrator record: kept while the service runs. It holds no email addresses or tokens.</li>
+</ul>
+
+<h2>Export and deletion</h2>
+<p>The account page offers an export of your data as a ZIP file. The download link works once and expires after 24 hours. The export never contains your game token.</p>
+<p>Deleting your account stops your SanHolo instance, deletes your game token from the secrets store, deletes your instance volume and deletes every database record belonging to your account. Deletion is permanent.</p>
+
+<h2>Your rights</h2>
+<p>Under the GDPR you can request access to, correction of, or deletion of your data, object to its processing, restrict its processing, or request a copy in a machine-readable format. Requests go to <a href="mailto:hello@tydewhatmay.eu">hello@tydewhatmay.eu</a>. You can also complain to a data protection authority. The authority for TydeWhatMay is the Berlin Commissioner for Data Protection and Freedom of Information.</p>
+
+<h2>Changes</h2>
+<p>Changes to this notice are published on this page with a new date. Changes that affect what is collected are announced by email to account holders before they take effect.</p>

@@ -245,3 +245,47 @@ func TestInviteRedeemedOnceUnderConcurrency(t *testing.T) {
 		t.Fatalf("winners = %d", won)
 	}
 }
+
+// The privacy notice promises both of these: a waiting-list entry goes when
+// the account is created, and an invite goes 14 days after it expires.
+func TestRetentionOfWaitlistAndInvites(t *testing.T) {
+	s, pool := newSvc(t, Options{})
+	ctx := context.Background()
+	for _, e := range []string{"Kept@example.org", "joined@example.org"} {
+		if err := s.JoinWaitlist(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, _, err := s.IssueInvite(ctx, "Joined@example.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.IssueInvite(ctx, "kept@example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Redeem(ctx, code); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM waitlist WHERE lower(email) = 'joined@example.org'`); n != 0 {
+		t.Errorf("waitlist entry survives sign-up")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM waitlist`); n != 1 {
+		t.Errorf("waitlist rows = %d, want the other entry kept", n)
+	}
+
+	start := s.now()
+	s.SetClock(func() time.Time { return start.Add(InviteTTL + 13*24*time.Hour) })
+	if err := s.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM invites`); n != 2 {
+		t.Fatalf("invites = %d before 14 days past expiry, want 2", n)
+	}
+	s.SetClock(func() time.Time { return start.Add(InviteTTL + 15*24*time.Hour) })
+	if err := s.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM invites`); n != 0 {
+		t.Errorf("invites = %d 15 days past expiry, want 0", n)
+	}
+}

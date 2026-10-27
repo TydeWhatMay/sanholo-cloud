@@ -56,6 +56,9 @@ func (a *App) mount(app *fiber.App) {
 	app.Use(csrf())
 
 	app.Get("/", a.home)
+	app.Get("/privacy", a.page("privacy", "Privacy notice"))
+	app.Get("/terms", a.page("terms", "Beta terms"))
+	app.Get("/imprint", a.page("imprint", "Imprint"))
 	app.Post("/waitlist", a.joinWaitlist)
 	app.Get("/signup", a.signupForm)
 	app.Post("/signup", a.signup)
@@ -116,6 +119,11 @@ func (a *App) clientIP(c *fiber.Ctx) string {
 
 func (a *App) home(c *fiber.Ctx) error {
 	return a.render(c, fiber.StatusOK, "home", "Waiting list", nil)
+}
+
+// page serves a fixed page such as the legal pages.
+func (a *App) page(name, title string) fiber.Handler {
+	return func(c *fiber.Ctx) error { return a.render(c, fiber.StatusOK, name, title, nil) }
 }
 
 func (a *App) joinWaitlist(c *fiber.Ctx) error {
