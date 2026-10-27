@@ -125,6 +125,10 @@ var (
 	hostNetRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
+// ValidDomain reports whether d is an acceptable tenant domain (lower-case
+// DNS name with at least two labels).
+func ValidDomain(d string) bool { return domainRE.MatchString(d) }
+
 // NormalizeVersion accepts "0.7.1" or "v0.7.1" and returns "0.7.1".
 func NormalizeVersion(v string) (string, error) {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")

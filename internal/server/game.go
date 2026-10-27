@@ -171,9 +171,9 @@ func (a *App) instanceView(c *fiber.Ctx) (fiber.Map, error) {
 		return fiber.Map{"Label": "Starting", "Detail": "This can take a few minutes. The page updates by itself.", "Starting": true}, nil
 	case provision.StateRunning:
 		if inst.Health == provision.HealthUnhealthy {
-			return fiber.Map{"Label": "Running, not answering", "Detail": "The bot is not passing its health check. SanHolo is watching it."}, nil
+			return fiber.Map{"Label": "Running, not answering", "Detail": "The bot is not passing its health check. SanHolo is watching it.", "Open": true}, nil
 		}
-		return fiber.Map{"Label": "Running"}, nil
+		return fiber.Map{"Label": "Running", "Open": true}, nil
 	case provision.StateFailed:
 		return fiber.Map{"Label": "Failed", "Detail": inst.FailureReason + ".", "CanRetry": true}, nil
 	}

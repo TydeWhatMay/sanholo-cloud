@@ -748,3 +748,55 @@ func TestRefreshDoesNotOverwriteAConcurrentStop(t *testing.T) {
 		t.Errorf("state = %q: a stale refresh overwrote the stop", got)
 	}
 }
+
+func TestUpstream(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.tenant(t, "acme", "active", true)
+
+	// No instance yet.
+	if _, err := e.svc.Upstream(ctx, "acme"); !errors.Is(err, provision.ErrNotRunning) {
+		t.Fatalf("no instance: %v, want ErrNotRunning", err)
+	}
+	if err := e.svc.Start(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	// Registered, no running allocation yet.
+	if _, err := e.svc.Upstream(ctx, "acme"); !errors.Is(err, provision.ErrStarting) {
+		t.Fatalf("pending: %v, want ErrStarting", err)
+	}
+	// Healthy: the allocation's address.
+	e.fake.SetPhase(job("acme"), nomadfake.Healthy)
+	addr, err := e.svc.Upstream(ctx, "acme")
+	if err != nil || addr != "10.0.0.7:23456" {
+		t.Fatalf("healthy: %q, %v", addr, err)
+	}
+	// Unhealthy but running is still reachable: the Bridge may be up.
+	e.fake.SetPhase(job("acme"), nomadfake.Unhealthy)
+	if addr, err := e.svc.Upstream(ctx, "acme"); err != nil || addr == "" {
+		t.Errorf("unhealthy: %q, %v", addr, err)
+	}
+	// Failed in Nomad.
+	e.fake.SetPhase(job("acme"), nomadfake.Failed)
+	if _, err := e.svc.Upstream(ctx, "acme"); !errors.Is(err, provision.ErrNotRunning) {
+		t.Errorf("failed: %v, want ErrNotRunning", err)
+	}
+	// Stopped on purpose.
+	e.fake.SetPhase(job("acme"), nomadfake.Healthy)
+	if err := e.svc.Stop(ctx, "acme", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Upstream(ctx, "acme"); !errors.Is(err, provision.ErrNotRunning) {
+		t.Errorf("stopped: %v, want ErrNotRunning", err)
+	}
+	// Nomad unreadable is neither of the two.
+	e.tenant(t, "beta", "active", true)
+	if err := e.svc.Start(ctx, "beta"); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.Override(func(r nomadfake.Request) (int, string, bool) { return 500, "boom", true })
+	_, err = e.svc.Upstream(ctx, "beta")
+	if err == nil || errors.Is(err, provision.ErrStarting) || errors.Is(err, provision.ErrNotRunning) {
+		t.Errorf("nomad down: %v, want a plain error", err)
+	}
+}

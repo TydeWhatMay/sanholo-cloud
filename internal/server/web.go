@@ -17,6 +17,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/connect"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
+	"github.com/lhaig/sanholo-cloud/internal/proxy"
 )
 
 //go:embed templates/*.html
@@ -48,6 +49,15 @@ type App struct {
 	Provision *provision.Service
 	// TrustedProxies are the edge addresses whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
+	// Proxy, with AppBaseURL and TenantDomain, turns on host routing:
+	// <tenant-id>.<TenantDomain> is the tenant's Bridge behind Proxy, the
+	// host of AppBaseURL is the control plane, and any other Host is 404.
+	// Nil leaves routing off: every host reaches the control plane.
+	Proxy        *proxy.Proxy
+	AppBaseURL   string
+	TenantDomain string
+
+	bridges *bridgeRouting
 }
 
 func (a *App) views() fiber.Views {
@@ -62,6 +72,14 @@ func (a *App) mount(app *fiber.App) {
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		panic(err)
+	}
+	if a.Proxy != nil {
+		b, err := newBridgeRouting(a.Proxy, a.AppBaseURL, a.TenantDomain)
+		if err != nil {
+			panic(err) // config validates both; this is a wiring bug
+		}
+		a.bridges = b
+		app.Use(b.route(a))
 	}
 	app.Use(securityHeaders)
 	// Static files carry the security headers too (nosniff, CSP). They sit
@@ -95,6 +113,7 @@ func (a *App) mount(app *fiber.App) {
 	acct.Post("/game/confirm", a.gameConfirm)
 	acct.Post("/game/cancel", a.gameCancel)
 	acct.Post("/instance/retry", a.instanceRetry)
+	acct.Post("/bridge/open", a.bridgeOpen)
 	app.Post("/signout", a.requireSession, a.signout)
 	a.mountAdmin(app)
 }
@@ -338,7 +357,7 @@ func (a *App) account(c *fiber.Ctx) error {
 	}
 	data := fiber.Map{
 		"Email": ses.Email, "Sessions": rows, "Passkeys": a.Auth.PasskeysEnabled(), "Keys": keys, "IsOperator": ses.IsOperator,
-		"GameAvailable": a.Connect.Available(),
+		"GameAvailable": a.Connect.Available(), "BridgeAvailable": a.bridges != nil,
 	}
 	if a.Connect != nil {
 		g, err := a.Connect.Get(c.UserContext(), ses.TenantID)

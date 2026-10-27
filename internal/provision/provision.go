@@ -66,6 +66,12 @@ var (
 	// ErrNotAllowed: the tenant is suspended or being deleted, or the
 	// instance is stopped on purpose.
 	ErrNotAllowed = errors.New("not allowed in the tenant's current state")
+	// ErrNotRunning means the tenant has no instance that should be running
+	// (never started, stopped, failed, or provisioning is off).
+	ErrNotRunning = errors.New("the tenant's bot is not running")
+	// ErrStarting means the instance exists and should run but has no
+	// reachable allocation yet.
+	ErrStarting = errors.New("the tenant's bot is starting")
 )
 
 // Options configure the service.
@@ -592,4 +598,34 @@ func (s *Service) restart(ctx context.Context, tenantID string, mark bool) error
 		return nil
 	}
 	return s.start(ctx, tenantID, true)
+}
+
+// Upstream is host:port of the tenant's running allocation, where the proxy
+// connects. ErrNotRunning when the tenant has no instance that should be
+// running; ErrStarting when it should be but Nomad shows no running
+// allocation of the current version; any other error is Nomad being
+// unreadable. It reads Nomad on every call; the caller caches briefly.
+func (s *Service) Upstream(ctx context.Context, tenantID string) (string, error) {
+	if !s.Enabled() {
+		return "", ErrNotRunning
+	}
+	inst, err := s.Get(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	if inst == nil || (inst.State != StatePending && inst.State != StateRunning) {
+		return "", ErrNotRunning
+	}
+	st, err := s.nomad.Status(ctx, inst.JobID)
+	if err != nil {
+		return "", fmt.Errorf("provision: upstream: %w", err)
+	}
+	switch st.Phase {
+	case nomad.PhaseAbsent, nomad.PhaseStopped, nomad.PhaseFailed:
+		return "", ErrNotRunning
+	}
+	if st.Address == "" {
+		return "", ErrStarting
+	}
+	return st.Address, nil
 }

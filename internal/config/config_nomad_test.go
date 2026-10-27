@@ -127,6 +127,10 @@ func TestLoadNomadRequiredInProduction(t *testing.T) {
 	} {
 		prod[k] = v
 	}
+	if _, err := Load(env(prod)); err == nil || !strings.Contains(err.Error(), "PROXY_SIGNING_KEY") {
+		t.Fatalf("production without a signing key: %v", err)
+	}
+	prod["PROXY_SIGNING_KEY"] = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
 	if _, err := Load(env(prod)); err != nil {
 		t.Fatalf("production with Nomad: %v", err)
 	}

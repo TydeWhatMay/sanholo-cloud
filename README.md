@@ -37,8 +37,9 @@ for them.
 | `NOMAD_TOKEN`, `NOMAD_TOKEN_FILE` | The control plane's Nomad ACL token, limited to the tenant namespace; exactly one of the two (the file is re-read on every request). Never logged. |
 | `NOMAD_NAMESPACE`, `NOMAD_REGION`, `NOMAD_DATACENTERS`, `NOMAD_HOST_NETWORK` | Namespace (default `sanholo`), region, datacenters (default `dc1`) and the host network the bot port is mapped onto. |
 | `SANHOLO_IMAGE_VERSION`, `SANHOLO_IMAGE_REPO` | Version new instances start at (`0.7.1` or `v0.7.1`) and the image repository (default `ghcr.io/tydewhatmay/sanholo`). |
-| `TENANT_PROXY_PUBLIC_KEYS`, `TENANT_PROXY_PUBLIC_KEYS_FILE` | The proxy's Ed25519 public key(s), exactly one of the two. |
-| `TENANT_DOMAIN`, `TENANT_ALERT_URL`, `VAPID_PUBLIC_KEY` | Public-URL domain (default `sanholo.space`), alert endpoint (default `APP_BASE_URL/internal/alerts`) and the Web Push public key handed to the bots. |
+| `PROXY_SIGNING_KEY`, `PROXY_SIGNING_KEY_FILE` | The Ed25519 private key the proxy signs each request's identity with: a PKCS#8 `PRIVATE KEY` PEM, or base64 of the 32-byte seed. Exactly one of the two. Turns the Bridge proxy on; required when `APP_ENV=production`. Never logged. The public key in every tenant job is derived from it. Generate: `openssl genpkey -algorithm ed25519`. |
+| `TENANT_PROXY_PUBLIC_KEYS`, `TENANT_PROXY_PUBLIC_KEYS_FILE` | With `PROXY_SIGNING_KEY`: optional, the next public key during a rotation (PEM, or base64 one per line), added after the signing key's own. Without it (development, proxy off): the proxy's public key(s), exactly one of the two. |
+| `TENANT_DOMAIN`, `TENANT_ALERT_URL`, `VAPID_PUBLIC_KEY` | Parent domain of the Bridge hosts (default `sanholo.space` once Nomad is configured; required with `PROXY_SIGNING_KEY` otherwise), alert endpoint (default `APP_BASE_URL/internal/alerts`) and the Web Push public key handed to the bots. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ`, `PROVISION_TIMEOUT` | Bot resources (384, 300) and how long a bot may take to become healthy (15m). |
 | `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
 | `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
@@ -178,6 +179,54 @@ disconnect and delete use it. The job carries no secret: the bot's game token
 comes from qm through the Nomad workload identity. The Nomad client
 (`internal/nomad`) only touches jobs named `sanholo-tenant-<valid tenant id>`.
 What the platform must provide is in `deploy/README.md`.
+
+### Bridge access and the proxy
+
+With `PROXY_SIGNING_KEY` set the control plane also serves each customer's
+Bridge (`internal/proxy`, `internal/server/bridge.go`). Routing is by the
+`Host` header:
+
+| Host | Served |
+| --- | --- |
+| host of `APP_BASE_URL` (`app.sanholo.space`) | the control plane, as before |
+| `<tenant-id>.<TENANT_DOMAIN>` (`tenant.Valid` id, one label) | that tenant's Bridge, through the proxy |
+| anything else | `404 not found`, the same answer every time |
+
+`/healthz` and `/readyz` answer on any host, for the platform's probes. A
+tenant id that does not exist is indistinguishable from one that does until a
+session says otherwise.
+
+Getting in: the signed-in account page has "Open my Bridge" (`POST
+/account/bridge/open`, CSRF-protected). It creates a 60 second single-use code
+(stored hashed, bound to that account session and the account's own tenant) and
+redirects to `https://<tenant-id>.<domain>/auth?code=...`. `GET /auth` on the
+tenant host swaps the code for the Bridge cookie `__Host-sanholo_bridge`
+(host-only, Secure, HttpOnly, SameSite=Lax, 24 hours at most and never longer
+than the account session). `HEAD` and prefetch requests to `/auth` answer
+204 and spend nothing; the endpoint is rate-limited per client IP (20 a minute).
+The account session cookie is host-only on the app host, so a browser never
+sends it to a tenant host, and the proxy removes both control plane cookies from
+anything it forwards. The Bridge session is a row that dies with the account
+session (sign out, revoke), and is refused once the tenant is suspended.
+
+Per request on a tenant host: no Bridge session redirects to
+`APP_BASE_URL/signin` (htmx requests get `401` with `HX-Redirect`); a session for
+another tenant, or a suspended tenant, is `404`; a bot that is not running gets a
+plain `503` page from the control plane ("Your bot is starting" or "not
+running"). Otherwise the request is forwarded to the allocation's address from
+Nomad (cached ten seconds, looked up again after a connection failure) with a
+fresh `X-SanHolo-Identity`: Ed25519 over `"sanholo-identity/v1." + payload`,
+payload `base64url({"tenant","aud","exp"})`, tenant and audience the tenant id,
+expiry two minutes ahead (the client accepts at most five). Any identity or
+`X-SanHolo-*` header from the browser is dropped first. The Bridge's own CSRF
+cookie and `X-CSRF-Token` pass through untouched. Responses carry the proxy's
+CSP, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, HSTS and
+`nosniff` in place of the Bridge's.
+
+Key rotation: set `TENANT_PROXY_PUBLIC_KEYS` to the new public key and roll the
+tenant jobs (the key file is part of the job, so the updater does it); then make
+the new key `PROXY_SIGNING_KEY` and drop the old public key. Tenants accept
+both during the overlap.
 
 ### The gate
 

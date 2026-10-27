@@ -6,6 +6,7 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/game"
+	"github.com/lhaig/sanholo-cloud/internal/identity"
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 )
@@ -44,6 +46,14 @@ type Config struct {
 	// Nomad is the route to tenant provisioning. Empty Client.Addr means
 	// provisioning is disabled (development only; production requires it).
 	Nomad Nomad
+	// TenantDomain is the parent domain of the Bridge hosts,
+	// <tenant-id>.<TenantDomain> (TENANT_DOMAIN; default sanholo.space once
+	// Nomad is configured).
+	TenantDomain string
+	// ProxyKey signs the identity of every request to a Bridge
+	// (PROXY_SIGNING_KEY or _FILE). Nil leaves the Bridge proxy off. A
+	// secret: never log or print a Config.
+	ProxyKey ed25519.PrivateKey
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
@@ -222,11 +232,25 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, err)
 	}
 	c.WebAuthn = wa
-	nm, err := nomadSettings(getenv, c.AppBaseURL, c.QM.Addr, c.Production)
+	key, err := proxySigningKey(getenv)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.ProxyKey = key
+	nm, err := nomadSettings(getenv, c.AppBaseURL, c.QM.Addr, c.Production, key)
 	if err != nil {
 		errs = append(errs, err)
 	}
 	c.Nomad = nm
+	c.TenantDomain = getenv("TENANT_DOMAIN")
+	if c.Nomad.Enabled() {
+		c.TenantDomain = c.Nomad.Job.TenantDomain
+	} else if c.TenantDomain != "" && !nomad.ValidDomain(c.TenantDomain) {
+		errs = append(errs, errors.New("TENANT_DOMAIN: want a lower-case domain name"))
+	}
+	if key != nil && c.TenantDomain == "" {
+		errs = append(errs, errors.New("PROXY_SIGNING_KEY is set: TENANT_DOMAIN is required too, Bridges are served at <tenant-id>.<TENANT_DOMAIN>"))
+	}
 	if c.Production {
 		if len(c.TrustedProxies) == 0 {
 			errs = append(errs, errors.New("TRUSTED_PROXIES is required when APP_ENV=production: without it every client shares the edge's rate-limit key"))
@@ -237,6 +261,9 @@ func Load(getenv func(string) string) (Config, error) {
 		if c.SMTP.Host != "" && c.SMTP.Username == "" {
 			errs = append(errs, errors.New("SMTP_USERNAME is required when APP_ENV=production: mail must be authenticated"))
 		}
+	}
+	if c.Production && key == nil {
+		errs = append(errs, errors.New("PROXY_SIGNING_KEY (or PROXY_SIGNING_KEY_FILE) is required when APP_ENV=production: without it nobody can reach a Bridge"))
 	}
 	if c.Production && !c.Nomad.Enabled() {
 		errs = append(errs, errors.New("NOMAD_ADDR is required when APP_ENV=production: tenant bots are started through Nomad"))
@@ -304,7 +331,7 @@ func qmSettings(getenv func(string) string, production bool) (QM, error) {
 //	SANHOLO_IMAGE_VERSION, SANHOLO_IMAGE_REPO, TENANT_PROXY_PUBLIC_KEYS or
 //	TENANT_PROXY_PUBLIC_KEYS_FILE, TENANT_DOMAIN, TENANT_ALERT_URL,
 //	VAPID_PUBLIC_KEY, TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT.
-func nomadSettings(getenv func(string) string, appBase, qmAddr string, production bool) (Nomad, error) {
+func nomadSettings(getenv func(string) string, appBase, qmAddr string, production bool, key ed25519.PrivateKey) (Nomad, error) {
 	n := Nomad{Client: nomad.Config{
 		Addr: getenv("NOMAD_ADDR"), Token: getenv("NOMAD_TOKEN"), TokenFile: getenv("NOMAD_TOKEN_FILE"),
 		Namespace: getenv("NOMAD_NAMESPACE"), Region: getenv("NOMAD_REGION"),
@@ -358,7 +385,7 @@ func nomadSettings(getenv func(string) string, appBase, qmAddr string, productio
 			errs = append(errs, err)
 		}
 	}
-	keys, kerr := proxyKeys(getenv)
+	keys, kerr := proxyKeys(getenv, key)
 	if kerr != nil {
 		errs = append(errs, kerr)
 	}
@@ -390,13 +417,68 @@ func nomadSettings(getenv func(string) string, appBase, qmAddr string, productio
 	return n, errors.Join(errs...)
 }
 
-// proxyKeys reads the proxy's public key(s), inline or from a file: public
-// values, but exactly one source so a stale copy cannot hide.
-func proxyKeys(getenv func(string) string) (string, error) {
+// proxySigningKey reads PROXY_SIGNING_KEY or PROXY_SIGNING_KEY_FILE (exactly
+// one when either is set): the private key the proxy signs identities with.
+// Nil when neither is set. Errors never include the key.
+func proxySigningKey(getenv func(string) string) (ed25519.PrivateKey, error) {
+	inline, file := getenv("PROXY_SIGNING_KEY"), getenv("PROXY_SIGNING_KEY_FILE")
+	var raw []byte
+	switch {
+	case inline == "" && file == "":
+		return nil, nil
+	case inline != "" && file != "":
+		return nil, errors.New("set only one of PROXY_SIGNING_KEY and PROXY_SIGNING_KEY_FILE")
+	case inline != "":
+		raw = []byte(inline)
+	default:
+		b, err := os.ReadFile(filepath.Clean(file))
+		if err != nil {
+			return nil, errors.New("PROXY_SIGNING_KEY_FILE: cannot read the file")
+		}
+		raw = b
+	}
+	k, err := identity.ParseSigningKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("PROXY_SIGNING_KEY: %w", err)
+	}
+	return k, nil
+}
+
+// proxyKeys produces the key file the tenant jobs carry. With a signing key
+// it is derived from that key (one source of truth), plus the optional
+// TENANT_PROXY_PUBLIC_KEYS(_FILE) as the next key during a rotation. Without
+// a signing key (development, before the proxy is set up) the public keys
+// are read as given, exactly one source.
+func proxyKeys(getenv func(string) string, key ed25519.PrivateKey) (string, error) {
 	inline, file := getenv("TENANT_PROXY_PUBLIC_KEYS"), getenv("TENANT_PROXY_PUBLIC_KEYS_FILE")
+	if key != nil {
+		if inline != "" && file != "" {
+			return "", errors.New("set only one of TENANT_PROXY_PUBLIC_KEYS and TENANT_PROXY_PUBLIC_KEYS_FILE")
+		}
+		var extra []ed25519.PublicKey
+		if text := inline; text != "" || file != "" {
+			if file != "" {
+				raw, err := os.ReadFile(filepath.Clean(file))
+				if err != nil {
+					return "", errors.New("TENANT_PROXY_PUBLIC_KEYS_FILE: cannot read the file")
+				}
+				text = string(raw)
+			}
+			keys, err := identity.ParsePublicKeys([]byte(text))
+			if err != nil {
+				return "", fmt.Errorf("TENANT_PROXY_PUBLIC_KEYS: %w", err)
+			}
+			extra = keys
+		}
+		out, err := identity.TenantKeyFile(key, extra...)
+		if err != nil {
+			return "", fmt.Errorf("TENANT_PROXY_PUBLIC_KEYS: %w", err)
+		}
+		return out, nil
+	}
 	switch {
 	case (inline == "") == (file == ""):
-		return "", errors.New("NOMAD_ADDR is set: set exactly one of TENANT_PROXY_PUBLIC_KEYS and TENANT_PROXY_PUBLIC_KEYS_FILE")
+		return "", errors.New("NOMAD_ADDR is set: set exactly one of TENANT_PROXY_PUBLIC_KEYS and TENANT_PROXY_PUBLIC_KEYS_FILE (or set PROXY_SIGNING_KEY)")
 	case inline != "":
 		return inline, nil
 	}

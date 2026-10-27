@@ -21,6 +21,9 @@ import (
 const baseURL = "http://127.0.0.1:8090"
 
 type env struct {
+	// host, when set, is the Host header of every request made by this
+	// env's clients (tests of host routing).
+	host  string
 	app   *fiber.App
 	svc   *auth.Service
 	admin *admin.Service
@@ -42,13 +45,14 @@ func newEnv(t *testing.T, opt auth.Options, trusted ...netip.Prefix) *env {
 
 // client is a minimal cookie jar over app.Test.
 type client struct {
+	host    string
 	t       *testing.T
 	app     *fiber.App
 	cookies map[string]*http.Cookie
 }
 
 func (e *env) client(t *testing.T) *client {
-	return &client{t: t, app: e.app, cookies: map[string]*http.Cookie{}}
+	return &client{t: t, app: e.app, cookies: map[string]*http.Cookie{}, host: e.host}
 }
 
 type result struct {
@@ -67,6 +71,9 @@ func (c *client) do(method, path string, form url.Values, hdr map[string]string)
 	req := httptest.NewRequest(method, path, body)
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if c.host != "" {
+		req.Host = c.host
 	}
 	for k, v := range hdr {
 		req.Header.Set(k, v)

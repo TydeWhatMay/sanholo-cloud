@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/mail"
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
+	"github.com/lhaig/sanholo-cloud/internal/proxy"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 )
@@ -127,7 +129,24 @@ func main() {
 
 	adm := admin.New(pool, svc)
 	adm.SetProvisioner(prov)
-	app := server.New(pool, server.WithApp(&server.App{Auth: svc, Admin: adm, Connect: conn, Provision: prov, TrustedProxies: cfg.TrustedProxies}))
+	web := &server.App{Auth: svc, Admin: adm, Connect: conn, Provision: prov, TrustedProxies: cfg.TrustedProxies}
+	if cfg.ProxyKey != nil {
+		appURL, err := url.Parse(cfg.AppBaseURL)
+		if err != nil {
+			log.Fatalf("proxy: %v", err)
+		}
+		bridge, err := proxy.New(proxy.Config{
+			Key: cfg.ProxyKey, Resolver: prov, Scheme: appURL.Scheme, AppOrigin: cfg.AppBaseURL,
+			TrustedProxies: cfg.TrustedProxies, Cookies: server.ControlPlaneCookies(),
+		})
+		if err != nil {
+			log.Fatalf("proxy: %v", err)
+		}
+		web.Proxy, web.AppBaseURL, web.TenantDomain = bridge, cfg.AppBaseURL, cfg.TenantDomain
+	} else {
+		log.Print("proxy: PROXY_SIGNING_KEY not set; Bridges are not served and every Host reaches the control plane")
+	}
+	app := server.New(pool, server.WithApp(web))
 	go func() {
 		<-ctx.Done()
 		_ = app.Shutdown()

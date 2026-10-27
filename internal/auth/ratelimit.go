@@ -41,22 +41,29 @@ func (s *Service) Allow(ctx context.Context, key string, limit int, window time.
 // so one host cannot take a fresh key per address; an IPv4-mapped IPv6
 // address is an IPv4 address.
 func ClientIP(peer netip.Addr, xff string, trusted []netip.Prefix) string {
+	return limitKey(ClientAddr(peer, xff, trusted))
+}
+
+// ClientAddr is the address ClientIP keys on, unmasked: the real client
+// address behind the edge, by the same trust rule. The proxy sends it to a
+// Bridge as X-Forwarded-For.
+func ClientAddr(peer netip.Addr, xff string, trusted []netip.Prefix) netip.Addr {
 	peer = peer.Unmap()
 	if !inAny(peer, trusted) || xff == "" {
-		return limitKey(peer)
+		return peer
 	}
 	parts := strings.Split(xff, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
 		a, err := netip.ParseAddr(strings.TrimSpace(parts[i]))
 		if err != nil {
-			return limitKey(peer)
+			return peer
 		}
 		a = a.Unmap()
 		if !inAny(a, trusted) {
-			return limitKey(a)
+			return a
 		}
 	}
-	return limitKey(peer)
+	return peer
 }
 
 // limitKey is the rate-limit identity of an address: IPv4 as is, IPv6 as its

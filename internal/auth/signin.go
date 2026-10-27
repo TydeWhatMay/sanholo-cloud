@@ -184,6 +184,8 @@ func (s *Service) Cleanup(ctx context.Context) error {
 		`DELETE FROM signin_requests WHERE processed_at < $1::timestamptz - interval '1 day'`,
 		`DELETE FROM magic_links WHERE expires_at < $1::timestamptz - interval '1 day'`,
 		`DELETE FROM account_sessions WHERE expires_at < $1`,
+		`DELETE FROM bridge_handoffs WHERE expires_at < $1::timestamptz - interval '1 hour'`,
+		`DELETE FROM bridge_sessions WHERE expires_at < $1`,
 		`DELETE FROM webauthn_challenges WHERE expires_at < $1`,
 		`DELETE FROM rate_counters WHERE window_start < $1::timestamptz - interval '2 days'`,
 		`DELETE FROM mail_outbox WHERE (sent_at IS NOT NULL OR failed_at IS NOT NULL) AND created_at < $1::timestamptz - interval '7 days'`,

@@ -75,6 +75,31 @@ One host volume per tenant, created before the tenant's job is registered:
   address (`nomad.Status.Address`); the service `sanholo-bot` is registered with
   the Nomad provider (tag `tenant=<id>`) as well.
 
+### Edge routing for the Bridge proxy (task 2.4)
+
+The control plane serves both the app and every Bridge, told apart by the
+`Host` header. The edge must therefore:
+
+- route `app.sanholo.space` and `*.sanholo.space` (one wildcard router) to the
+  control plane, and pass the original `Host` header through unchanged;
+- terminate TLS with a wildcard certificate for `*.sanholo.space` (DNS-01
+  challenge; HTTP-01 cannot issue wildcards) plus `app.sanholo.space` if the
+  apex wildcard does not cover it;
+- send `X-Forwarded-For` with the client address, and list the edge's address in
+  `TRUSTED_PROXIES`, as for the app today (the proxy believes the header only
+  from there and rebuilds it for the Bridge);
+- not log query strings on any host: sign-in links and invite codes
+  (`?token=`, `?code=`) and the Bridge handoff (`/auth?code=`, valid 60 seconds,
+  single use) travel in URLs. Log the path only;
+- not cache, compress-and-rewrite or buffer responses from `*.sanholo.space`
+  (the proxy streams; an edge that buffers delays any long-lived response);
+- set HSTS if it likes; the control plane sets `max-age=31536000` on Bridge
+  responses itself (the app host's HSTS remains the edge's, as before);
+- let the control plane's allocation addresses be reachable: the control plane
+  host must be allowed through the firewall rule in section 3 to the tenant
+  ports (it is "the proxy" there);
+- keep `/healthz` and `/readyz` checkable by address (any `Host`).
+
 ## 4. Image
 
 `ghcr.io/tydewhatmay/sanholo:vX.Y.Z` is public, so Nomad pulls without registry
@@ -91,8 +116,9 @@ instances start at. An existing instance keeps its own version; the updater
 | `NOMAD_REGION`, `NOMAD_DATACENTERS` | Optional region; datacenters default `dc1`. |
 | `NOMAD_HOST_NETWORK` | Host network for the port, see section 3. |
 | `SANHOLO_IMAGE_VERSION` | Required with `NOMAD_ADDR`. |
-| `TENANT_PROXY_PUBLIC_KEYS` or `TENANT_PROXY_PUBLIC_KEYS_FILE` | The proxy's Ed25519 public key(s) (PEM, or base64 one per line; two during a rotation). Public values, written into each job as a template. Required with `NOMAD_ADDR`. Task 2.4 owns the matching private key. |
-| `TENANT_DOMAIN` | Default `sanholo.space`; each bot gets `-public-url https://<id>.<domain>`. |
+| `PROXY_SIGNING_KEY` or `PROXY_SIGNING_KEY_FILE` | The proxy's Ed25519 private key (PKCS#8 PEM, or base64 of the 32-byte seed). Required in production; a secret, so deliver it as a file from qm, not in the job spec. The control plane derives the public key written into every tenant job (`proxy-pubkey.pem`) from it. |
+| `TENANT_PROXY_PUBLIC_KEYS` or `TENANT_PROXY_PUBLIC_KEYS_FILE` | Optional with `PROXY_SIGNING_KEY`: the next public key during a rotation, so tenants accept two. Public. |
+| `TENANT_DOMAIN` | Default `sanholo.space`; each bot gets `-public-url https://<id>.<domain>`, and `<id>.<domain>` is where the control plane serves that bot's Bridge. |
 | `TENANT_ALERT_URL` | Where bots post alerts. Default `APP_BASE_URL/internal/alerts`. |
 | `VAPID_PUBLIC_KEY` | Optional Web Push public key passed to the bots. |
 | `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ` | Default 384 and 300. |
