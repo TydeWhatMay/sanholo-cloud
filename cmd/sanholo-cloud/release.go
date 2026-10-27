@@ -22,6 +22,7 @@ const releaseUsage = `usage:
   sanholo-cloud release start <version>    plan the rollout; the running service carries it out
   sanholo-cloud release resume             resume the halted rollout
   sanholo-cloud release abandon            give up the halted rollout
+  sanholo-cloud release override-canary <version>   proceed although the canary was unhealthy in the last hour
   sanholo-cloud release canary <tenant-id>|none`
 
 // runRelease is `sanholo-cloud release ...`. It reads the same environment as
@@ -118,6 +119,14 @@ func releaseCmd(ctx context.Context, svc *admin.Service, args []string, out io.W
 			return releaseErr(err, "")
 		}
 		_, _ = fmt.Fprintln(out, "rollout abandoned")
+	case "override-canary":
+		if len(rest) != 1 {
+			return errors.New(releaseUsage)
+		}
+		if err := svc.OverrideCanaryGate(ctx, admin.ActorCLI, rest[0]); err != nil {
+			return releaseErr(err, rest[0])
+		}
+		_, _ = fmt.Fprintf(out, "canary gate overridden for %s\n", rest[0])
 	case "canary":
 		if len(rest) != 1 {
 			return errors.New(releaseUsage)
@@ -147,7 +156,7 @@ func releaseErr(err error, what string) error {
 	case errors.Is(err, admin.ErrRolloutActive):
 		return errors.New("another rollout is rolling or halted: resume or abandon it first")
 	case errors.Is(err, admin.ErrCanaryUnhealthy):
-		return errors.New("the canary tenant failed its health check in the last hour: start the rollout when it has been healthy for an hour")
+		return errors.New("the canary tenant failed its health check in the last hour: start the rollout when it has been healthy for an hour, or run: release override-canary <version>")
 	case errors.Is(err, admin.ErrState):
 		return errors.New("not applicable in the current state (the release is already rolling, or there is no halted rollout, or a revert is still under way)")
 	}

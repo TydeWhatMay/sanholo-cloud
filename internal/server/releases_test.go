@@ -220,3 +220,43 @@ func TestAccountPageShowsTheInstanceVersion(t *testing.T) {
 		t.Errorf("the account page shows the wrong version:\n%s", body)
 	}
 }
+
+// A canary that stays unhealthy must not wedge a release silently: the page
+// says why and offers an audited override.
+func TestAdminReleasesPageShowsTheCanaryGateAndOverrides(t *testing.T) {
+	e, op := releasesEnv(t)
+	ctx := context.Background()
+	if r := op.post("/admin/releases/add", url.Values{"version": {"0.8.0"}}); r.status != 303 {
+		t.Fatalf("add: %d", r.status)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO tenants (id, status, is_canary) VALUES ('acme', 'active', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO tenant_instances (tenant_id, job_id, image_version, state, last_unhealthy_at) VALUES ('acme', 'sanholo-tenant-acme', '0.7.1', 'running', now() - interval '10 minutes')`); err != nil {
+		t.Fatal(err)
+	}
+	page := op.get("/admin/releases", nil)
+	for _, want := range []string{"Held by the canary gate", "acme", "was unhealthy in the last hour", `action="/admin/releases/0.8.0/override-canary"`} {
+		if !strings.Contains(page.body, want) {
+			t.Errorf("page lacks %q:\n%s", want, page.body)
+		}
+	}
+	if r := op.post("/admin/releases/0.8.0/start", nil); r.status != 409 || !strings.Contains(r.body, "override the canary gate") {
+		t.Errorf("a refused start: %d %s", r.status, r.body)
+	}
+	if r := op.post("/admin/releases/0.8.0/override-canary", nil); r.status != 303 || !strings.HasPrefix(r.header.Get("Location"), "/admin/releases?done=override") {
+		t.Fatalf("override: %d %q", r.status, r.header.Get("Location"))
+	}
+	if rows(t, e.pool, `SELECT count(*) FROM audit_log WHERE action = 'rollout.canary_override' AND target = 'release:0.8.0'`) != 1 {
+		t.Error("the override is not audited")
+	}
+	if strings.Contains(op.get("/admin/releases", nil).body, "Held by the canary gate") {
+		t.Error("an overridden gate is still shown as holding")
+	}
+	if r := op.post("/admin/releases/0.8.0/start", nil); r.status != 303 {
+		t.Errorf("start after the override: %d", r.status)
+	}
+	if r := op.post("/admin/releases/7.7.7/override-canary", nil); r.status != 404 {
+		t.Errorf("override of an unknown release: %d", r.status)
+	}
+}

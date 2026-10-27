@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 
+	"github.com/lhaig/sanholo-cloud/internal/audit"
 	"github.com/lhaig/sanholo-cloud/internal/nomad"
 )
 
@@ -48,7 +49,10 @@ func (s *Service) converge(ctx context.Context, tenantID string) bool {
 	if !anyRollout {
 		if tv, td, ok, err := s.target(ctx); err != nil {
 			return false
-		} else if ok && (tv != version || td != digest) {
+		} else if ok && nomad.CompareVersions(tv, version) > 0 {
+			// Forward only. An abandoned rollout leaves tenants on a version
+			// that is newer than the target; moving them back could put an
+			// older client on a volume a newer one has migrated.
 			version, digest, moved = tv, td, true
 		}
 	}
@@ -67,7 +71,36 @@ func (s *Service) converge(ctx context.Context, tenantID string) bool {
 		return false
 	}
 	s.log.Info("provision: job brought in line", "tenant", tenantID, "version", version, "moved", moved)
+	s.auditConverge(ctx, tenantID, inst.ImageVersion, version, moved)
 	return true
+}
+
+// ActorReconcile is the audit actor of what the reconcile worker changes.
+const ActorReconcile = "reconcile"
+
+// auditConverge records a re-registration made by the reconcile worker: a
+// move to a newer version, or the same version registered again after drift.
+// Best effort: the change is made, and a failed write is logged.
+func (s *Service) auditConverge(ctx context.Context, tenantID, from, to string, moved bool) {
+	ctx = context.WithoutCancel(ctx)
+	action := "instance.reregister"
+	if moved {
+		action = "instance.converge"
+	}
+	err := func() error {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if err := audit.Write(ctx, tx, s.now(), ActorReconcile, action, "tenant:"+tenantID, map[string]any{"from": from, "to": to}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}()
+	if err != nil {
+		s.log.Error("provision: could not audit a converge", "tenant", tenantID, "error", err)
+	}
 }
 
 // MarkUnhealthy records that the instance was seen unhealthy now (the
@@ -121,6 +154,13 @@ func (s *Service) SoakBaseline(ctx context.Context, tenantID string) (SoakBase, 
 	if err != nil {
 		return SoakBase{}, ErrNotFound
 	}
+	// Under the tenant's lock, so a restart the control plane is carrying out
+	// is finished (and recorded) before the baseline is read.
+	unlock, err := s.lockTenant(ctx, tenantID)
+	if err != nil {
+		return SoakBase{}, err
+	}
+	defer unlock()
 	st, err := s.nomad.Status(ctx, jobID)
 	if err != nil {
 		return SoakBase{}, err
@@ -172,4 +212,23 @@ func (s *Service) DeleteVolume(ctx context.Context, tenantID string) error {
 // it (suspension).
 func (s *Service) RecordStopFailure(ctx context.Context, tenantID string) {
 	s.fail(ctx, tenantID, ReasonStopFailed)
+}
+
+// finishVolumeDeletion carries out a volume deletion that a disconnect left
+// pending (Nomad refused it then) before the tenant gets a volume again: a
+// different game account connected later must not inherit the old account's
+// data. Nothing is pending in the normal case, which costs one query.
+func (s *Service) finishVolumeDeletion(ctx context.Context, tenantID string) error {
+	var pending bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pending_cleanups WHERE tenant_key = $1 AND kind = 'volume')`, tenantID).Scan(&pending); err != nil {
+		return err
+	}
+	if !pending {
+		return nil
+	}
+	if err := s.nomad.DeleteHostVolume(ctx, tenantID); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = 'volume'`, tenantID)
+	return err
 }

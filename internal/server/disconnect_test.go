@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/nomad/nomadfake"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
@@ -157,6 +158,7 @@ func TestDisconnectWhenQmCannotDeleteYetKeepsThePurgePending(t *testing.T) {
 		t.Errorf("a retry against a refusing qm finished %d", n)
 	}
 	p.qm.SetDeleteAllowed(true)
+	p.clock.advance(2 * time.Minute) // past the first backoff
 	if n := p.conn.RetryCleanups(context.Background()); n != 1 {
 		t.Errorf("retry finished %d, want 1", n)
 	}
@@ -182,6 +184,7 @@ func TestDisconnectKeepsAVolumeDeletionNomadRefusedPending(t *testing.T) {
 		t.Error("the volume deletion was not recorded")
 	}
 	p.fake.Override(nil)
+	p.clock.advance(2 * time.Minute) // past the first backoff
 	if n := p.conn.RetryCleanups(context.Background()); n != 1 || len(p.fake.Volumes()) != 0 {
 		t.Errorf("retry finished %d, volumes %v", n, p.fake.Volumes())
 	}
@@ -262,10 +265,15 @@ func TestRetryDoesNotPurgeATenantThatIsConnected(t *testing.T) {
 		t.Error("a connected tenant's token was purged")
 	}
 	if len(p.fake.Volumes()) != 1 {
-		t.Errorf("a connected tenant's volume was deleted: %v", p.fake.Volumes())
+		t.Errorf("a retry deleted a connected tenant's volume: %v", p.fake.Volumes())
 	}
-	if rows(t, p.pool, `SELECT count(*) FROM pending_cleanups`) != 0 {
-		t.Error("the moot deletions were kept")
+	// The old token's purge is moot; the volume's deletion is left to the
+	// start of the new connection, which makes it before creating a volume.
+	if rows(t, p.pool, `SELECT count(*) FROM pending_cleanups WHERE kind = 'secret'`) != 0 {
+		t.Error("the moot purge was kept")
+	}
+	if rows(t, p.pool, `SELECT count(*) FROM pending_cleanups WHERE kind = 'volume'`) != 1 {
+		t.Error("a connected tenant's pending volume deletion was dropped without being carried out")
 	}
 }
 

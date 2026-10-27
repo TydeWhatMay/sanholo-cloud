@@ -232,10 +232,12 @@ func (s *Service) store(ctx context.Context, e pendingEntry) (Connected, error) 
 		return Connected{}, fmt.Errorf("connect: record: %w", err)
 	}
 
-	// A deletion still pending from an earlier disconnect would remove what
-	// this connect is about to write; it is moot now (a later disconnect or
-	// account deletion purges everything again).
-	if _, err := tx.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1`, e.tenantID); err != nil {
+	// A purge still pending from an earlier disconnect would remove what this
+	// connect is about to write; it is moot now (a later disconnect or account
+	// deletion purges everything again). A pending volume deletion is not
+	// cancelled: the start that follows carries it out before it creates the
+	// tenant's new volume, so another game account never inherits the data.
+	if _, err := tx.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = 'secret'`, e.tenantID); err != nil {
 		return Connected{}, fmt.Errorf("connect: cancel pending deletions: %w", err)
 	}
 

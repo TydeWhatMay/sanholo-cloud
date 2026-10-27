@@ -231,12 +231,25 @@ operator: resume (the tenants that were reverted are tried again) or abandon
 (tenants already on the new version stay there). The account page shows the
 bot's version.
 
+A restart the control plane asked for during a soak (a rotated token, a retry,
+an admin restart) is recorded in `tenant_instances.restart_requested_at` before
+Nomad is asked, because Nomad counts it in the task's restart count like a
+crash; the soak then starts over instead of failing the update. A canary that
+halts a rollout for any reason is recorded as unhealthy. When the canary gate
+holds a release back, the log says so (at most every ten minutes) and the
+admin releases page shows the tenant and the time the gate opens by itself. The
+operator can override it for a release, audited (`release override-canary
+<version>`, or the button on the page); abandoning the rollout clears the
+override.
+
 The reconcile worker also keeps each running instance in line with what the
 control plane expects, without fighting the updater: a job whose spec differs
 from the one the current settings render (a rotated proxy key, a changed
 limit) is registered again, a few tenants per pass, and an instance that was
 skipped by a rollout because it was not running, and that is running on an old
-version later, is moved to the fleet target. Neither happens for a tenant with
+version later, is moved to the fleet target, only to a newer version (an abandoned rollout
+leaves tenants ahead of the target, and they stay there); every re-registration
+it makes is audited (`instance.converge`, `instance.reregister`). Neither happens for a tenant with
 an unfinished row in a rollout, and the second waits for every rollout to end.
 The health shown on the account page and in `/admin` comes from the live check
 results, because Nomad's deployment verdict never changes after it is decided.
@@ -258,8 +271,14 @@ transaction; the tenant and the account stay. Deleting the token in qm
 (`secrets.PurgeTenant`) and the tenant's host volume then follow. Until qm ships
 its purge endpoint the purge is refused: the deletion is kept in
 `pending_cleanups` (fixed reason phrase, attempt count) and retried every
-minute, and the customer is told so plainly. A new connect for the tenant
-cancels pending deletions, so a late purge cannot remove a new token.
+minute while it works. A failing deletion backs off (a minute, doubling, at most six
+hours) and is logged at error level at the 5th, 10th, 25th, 50th and 100th
+failure; the kinds are retried independently. A new connect for the tenant
+cancels the pending purge, and the purge runs under the tenant's row lock, so a
+late purge cannot remove a new token. A pending volume deletion is carried out
+by the next start before it makes a new volume, so another game account never
+inherits the old data. The disconnect holds the tenant's provisioning lock from
+the stop to the commit. Lock order: that lock, then the tenants row.
 
 ### Bridge access and the proxy
 

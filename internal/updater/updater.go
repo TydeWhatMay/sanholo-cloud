@@ -122,6 +122,8 @@ type Service struct {
 	log     *slog.Logger
 	now     func() time.Time
 
+	heldLogged time.Time // last time a held canary gate was logged
+
 	mu sync.Mutex // one Step at a time in this process
 }
 
@@ -159,6 +161,9 @@ type Release struct {
 	CreatedAt    time.Time
 	StartedAt    *time.Time
 	FinishedAt   *time.Time
+	// CanaryOverride: the operator chose to proceed although the canary
+	// tenant was unhealthy in the last hour.
+	CanaryOverride bool
 }
 
 // Row is a tenant's progress in a release's rollout.
@@ -179,11 +184,11 @@ type Row struct {
 	SoakRestarts  int
 }
 
-const releaseCols = `version, coalesce(digest, ''), notes, url, state, is_target, batch_size, halted_tenant, halt_reason, created_at, started_at, finished_at`
+const releaseCols = `version, coalesce(digest, ''), notes, url, state, is_target, batch_size, halted_tenant, halt_reason, created_at, started_at, finished_at, canary_override`
 
 func scanRelease(row pgx.Row) (Release, error) {
 	var r Release
-	err := row.Scan(&r.Version, &r.Digest, &r.Notes, &r.URL, &r.State, &r.IsTarget, &r.BatchSize, &r.HaltedTenant, &r.HaltReason, &r.CreatedAt, &r.StartedAt, &r.FinishedAt)
+	err := row.Scan(&r.Version, &r.Digest, &r.Notes, &r.URL, &r.State, &r.IsTarget, &r.BatchSize, &r.HaltedTenant, &r.HaltReason, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.CanaryOverride)
 	return r, err
 }
 

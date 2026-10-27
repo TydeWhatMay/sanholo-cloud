@@ -490,6 +490,7 @@ func (f *Fake) restart(w http.ResponseWriter, alloc string) {
 	for _, j := range f.jobs {
 		if j.allocID == alloc {
 			j.restarts++
+			j.taskRestarts++ // Nomad counts a requested restart like any other (checked on 2.0.6)
 			writeJSON(w, map[string]any{})
 			return
 		}

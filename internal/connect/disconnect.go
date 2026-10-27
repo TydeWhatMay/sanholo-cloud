@@ -71,9 +71,21 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 	case err != nil:
 		return out, fmt.Errorf("connect: disconnect: %w", err)
 	}
+	// The tenant's lock is held from the stop to the commit of the rows being
+	// deleted: a start that passed its checks before this disconnect must not
+	// register the job after the stop, nor recreate the instance row after it
+	// is deleted. Lock order: this lock, then the tenants row.
+	unlock := func() {}
 	if s.prov.Enabled() {
+		u, err := s.prov.LockTenant(ctx, tenantID)
+		if err != nil {
+			s.log.Warn("connect: could not lock the tenant", "tenant", tenantID, "error", err)
+			return out, ErrStopFailed
+		}
+		unlock = u
+		defer func() { unlock() }()
 		for _, purge := range []bool{false, true} {
-			if err := s.prov.Stop(ctx, tenantID, purge); err != nil {
+			if err := s.prov.StopLocked(ctx, tenantID, purge); err != nil {
 				s.log.Warn("connect: could not stop the bot", "tenant", tenantID, "purge", purge, "error", err)
 				return out, ErrStopFailed
 			}
@@ -106,7 +118,7 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO pending_cleanups (tenant_key, kind, requested_at) VALUES ($1, $2, $3)
-				ON CONFLICT (tenant_key, kind) DO UPDATE SET requested_at = EXCLUDED.requested_at, attempts = 0, last_error = ''`,
+				ON CONFLICT (tenant_key, kind) DO UPDATE SET requested_at = EXCLUDED.requested_at, attempts = 0, last_attempt_at = NULL, last_error = ''`,
 				tenantID, kind, now); err != nil {
 				return fmt.Errorf("connect: disconnect: %w", err)
 			}
@@ -119,6 +131,8 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 	if err != nil {
 		return out, err
 	}
+	unlock()
+	unlock = func() {}
 	s.log.Info("connect: game account disconnected", "tenant", tenantID)
 	if wantVolume {
 		out.VolumePending = !s.cleanup(ctx, tenantID, KindVolume)
@@ -129,43 +143,101 @@ func (s *Service) Disconnect(ctx context.Context, accountID, tenantID string) (D
 	return out, nil
 }
 
+// cleanupDue is the SQL condition (with the clock as $2) for a pending
+// deletion to be attempted now: a deletion that keeps failing backs off, one
+// minute after the first failure, doubling, never more than six hours between
+// attempts.
+const cleanupDue = `(last_attempt_at IS NULL OR last_attempt_at + LEAST(interval '6 hours', interval '1 minute' * power(2, LEAST(attempts - 1, 10))) <= $2)`
+
+// stuckThresholds are the attempt counts at which a deletion that keeps
+// failing is logged at error level once, so an operator sees it.
+var stuckThresholds = map[int]bool{5: true, 10: true, 25: true, 50: true, 100: true}
+
 // cleanup attempts one pending deletion and reports whether it is done. A
 // failure is logged (the errors carry no secret) and recorded with a fixed
 // phrase.
+//
+// It runs in a transaction that holds the tenant's row lock from the check
+// to the end of the remote call. A connect for the tenant takes the same row
+// lock first, so a late purge cannot delete the token a connect is about to
+// write (or has just written): either it purges first and the connect writes
+// afterwards, or the connect commits first and the check below sees the game
+// account. Lock order everywhere: the tenant's provisioning lock (if any),
+// then this row; connect.store, Disconnect and this function all take the row
+// before anything else in the database, so none can wait on another in a cycle.
 func (s *Service) cleanup(ctx context.Context, tenantID, kind string) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	// A tenant that connected again no longer wants its old data removed.
-	var connected bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM game_accounts WHERE tenant_id = $1)`, tenantID).Scan(&connected); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		s.log.Error("connect: cleanup", "tenant", tenantID, "kind", kind, "error", err)
 		return false
 	}
-	var err error
-	phrase := cleanupUnavailable
+	defer func() { _ = tx.Rollback(ctx) }()
+	// No tenant row (the tenant is gone) is fine: nothing can connect to it.
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`, tenantID).Scan(&one); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		s.log.Error("connect: cleanup", "tenant", tenantID, "kind", kind, "error", err)
+		return false
+	}
+	var pending, connected bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pending_cleanups WHERE tenant_key = $1 AND kind = $2),
+		       EXISTS (SELECT 1 FROM game_accounts WHERE tenant_id = $1)`, tenantID, kind).Scan(&pending, &connected); err != nil {
+		s.log.Error("connect: cleanup", "tenant", tenantID, "kind", kind, "error", err)
+		return false
+	}
 	switch {
+	case !pending:
+		return true // someone finished it
+	case connected && kind == KindSecret:
+		// Connected again: the old token is replaced and a later disconnect
+		// purges everything.
+		return s.finishCleanup(ctx, tx, tenantID, kind)
 	case connected:
-		_, _ = s.pool.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = $2`, tenantID, kind)
-		return true
-	case kind == KindSecret:
+		// The new connection's start deletes the old volume before it makes
+		// a new one (provision.register); leave it to that.
+		return false
+	}
+	phrase := cleanupUnavailable
+	switch kind {
+	case KindSecret:
 		err = s.sec.PurgeTenant(ctx, tenantID)
 		if isDenied(err) {
 			phrase = cleanupDenied
 		}
-	case kind == KindVolume:
+	case KindVolume:
 		err = s.prov.DeleteVolume(ctx, tenantID)
 		phrase = cleanupVolume
 	}
 	if err != nil {
-		s.log.Warn("connect: a deletion is still pending", "tenant", tenantID, "kind", kind, "error", err)
-		if _, uerr := s.pool.Exec(ctx, `
+		var attempts int
+		if uerr := tx.QueryRow(ctx, `
 			UPDATE pending_cleanups SET attempts = attempts + 1, last_attempt_at = $3, last_error = $4
-			WHERE tenant_key = $1 AND kind = $2`, tenantID, kind, s.now(), phrase); uerr != nil {
+			WHERE tenant_key = $1 AND kind = $2 RETURNING attempts`, tenantID, kind, s.now(), phrase).Scan(&attempts); uerr != nil {
 			s.log.Error("connect: could not record a failed deletion", "tenant", tenantID, "kind", kind, "error", uerr)
+			return false
+		}
+		if cerr := tx.Commit(ctx); cerr != nil {
+			s.log.Error("connect: could not record a failed deletion", "tenant", tenantID, "kind", kind, "error", cerr)
+			return false
+		}
+		if stuckThresholds[attempts] {
+			s.log.Error("connect: a deletion is stuck", "tenant", tenantID, "kind", kind, "attempts", attempts, "reason", phrase, "error", err)
+		} else {
+			s.log.Warn("connect: a deletion is still pending", "tenant", tenantID, "kind", kind, "attempts", attempts, "error", err)
 		}
 		return false
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = $2`, tenantID, kind); err != nil {
+	return s.finishCleanup(ctx, tx, tenantID, kind)
+}
+
+func (s *Service) finishCleanup(ctx context.Context, tx pgx.Tx, tenantID, kind string) bool {
+	if _, err := tx.Exec(ctx, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = $2`, tenantID, kind); err != nil {
+		s.log.Error("connect: could not clear a finished deletion", "tenant", tenantID, "kind", kind, "error", err)
+		return false
+	}
+	if err := tx.Commit(ctx); err != nil {
 		s.log.Error("connect: could not clear a finished deletion", "tenant", tenantID, "kind", kind, "error", err)
 		return false
 	}
@@ -173,33 +245,38 @@ func (s *Service) cleanup(ctx context.Context, tenantID, kind string) bool {
 	return true
 }
 
-// RetryCleanups attempts every pending deletion once and returns how many
-// finished.
+// RetryCleanups attempts the pending deletions that are due, each kind
+// independently (a pile of stuck secret purges must not starve the volumes),
+// and returns how many finished. A failing deletion backs off, see
+// cleanupDue.
 func (s *Service) RetryCleanups(ctx context.Context) int {
-	rows, err := s.pool.Query(ctx, `SELECT tenant_key, kind FROM pending_cleanups ORDER BY requested_at, tenant_key, kind LIMIT 100`)
-	if err != nil {
-		s.log.Error("connect: pending deletions", "error", err)
-		return 0
-	}
-	type item struct{ tenant, kind string }
-	var items []item
-	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.tenant, &it.kind); err == nil {
-			items = append(items, it)
-		}
-	}
-	rows.Close()
 	done := 0
-	for _, it := range items {
-		if ctx.Err() != nil {
-			break
-		}
-		if (it.kind == KindSecret && !s.sec.Enabled()) || (it.kind == KindVolume && !s.prov.Enabled()) {
+	for _, kind := range []string{KindSecret, KindVolume} {
+		if (kind == KindSecret && !s.sec.Enabled()) || (kind == KindVolume && !s.prov.Enabled()) {
 			continue
 		}
-		if s.cleanup(ctx, it.tenant, it.kind) {
-			done++
+		rows, err := s.pool.Query(ctx, `
+			SELECT tenant_key FROM pending_cleanups WHERE kind = $1 AND `+cleanupDue+`
+			ORDER BY last_attempt_at NULLS FIRST, requested_at, tenant_key LIMIT 100`, kind, s.now())
+		if err != nil {
+			s.log.Error("connect: pending deletions", "kind", kind, "error", err)
+			continue
+		}
+		var tenants []string
+		for rows.Next() {
+			var t string
+			if err := rows.Scan(&t); err == nil {
+				tenants = append(tenants, t)
+			}
+		}
+		rows.Close()
+		for _, t := range tenants {
+			if ctx.Err() != nil {
+				return done
+			}
+			if s.cleanup(ctx, t, kind) {
+				done++
+			}
 		}
 	}
 	return done

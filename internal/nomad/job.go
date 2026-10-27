@@ -138,6 +138,85 @@ var (
 	hostNetRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
+// CompareVersions orders two normalised versions (X.Y.Z or X.Y.Z-pre) by
+// semver: -1, 0 or 1. A prerelease is older than its release; prereleases are
+// compared by their dot-separated parts, numbers as numbers. Unparsable input
+// compares equal, so nothing is moved on the strength of it.
+func CompareVersions(a, b string) int {
+	pa, okA := splitVersion(a)
+	pb, okB := splitVersion(b)
+	if !okA || !okB {
+		return 0
+	}
+	for i := range 3 {
+		if pa.num[i] != pb.num[i] {
+			if pa.num[i] < pb.num[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case pa.pre == pb.pre:
+		return 0
+	case pa.pre == "":
+		return 1
+	case pb.pre == "":
+		return -1
+	}
+	xa, xb := strings.Split(pa.pre, "."), strings.Split(pb.pre, ".")
+	for i := 0; i < len(xa) && i < len(xb); i++ {
+		na, ea := strconv.Atoi(xa[i])
+		nb, eb := strconv.Atoi(xb[i])
+		switch {
+		case ea == nil && eb == nil && na != nb:
+			if na < nb {
+				return -1
+			}
+			return 1
+		case ea == nil && eb != nil:
+			return -1
+		case ea != nil && eb == nil:
+			return 1
+		case ea != nil && eb != nil && xa[i] != xb[i]:
+			if xa[i] < xb[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(xa) < len(xb):
+		return -1
+	case len(xa) > len(xb):
+		return 1
+	}
+	return 0
+}
+
+type parsedVersion struct {
+	num [3]int
+	pre string
+}
+
+func splitVersion(v string) (parsedVersion, bool) {
+	var p parsedVersion
+	core, pre, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return p, false
+	}
+	for i, x := range parts {
+		n, err := strconv.Atoi(x)
+		if err != nil || n < 0 {
+			return p, false
+		}
+		p.num[i] = n
+	}
+	p.pre = pre
+	return p, true
+}
+
 // ValidDomain reports whether d is an acceptable tenant domain (lower-case
 // DNS name with at least two labels).
 func ValidDomain(d string) bool { return domainRE.MatchString(d) }

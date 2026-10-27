@@ -1,8 +1,11 @@
 package updater_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,5 +229,171 @@ func TestRolloutDoesNotCompleteWhileTheCanaryWasUnhealthyInTheLastHour(t *testin
 	e.step(t, 1)
 	if r := e.release1(t, "0.8.0"); r.State != updater.StateDone || !r.IsTarget {
 		t.Fatalf("release = %+v, want done and the target once the canary had been clean for an hour", r)
+	}
+}
+
+// The control plane restarts bots too (a rotated token, a retry, an admin
+// restart) and Nomad counts those in the restart count like crashes. That is
+// not the update's fault: the soak starts over instead of halting.
+func TestARestartTheControlPlaneAskedForDoesNotFailTheSoak(t *testing.T) {
+	e := withSoak(newEnv(t, 1))
+	e.tenants(t, "t01")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 1)
+	e.advance(20 * time.Minute)
+	if err := e.prov.Restart(context.Background(), "t01"); err != nil { // e.g. a token rotated
+		t.Fatal(err)
+	}
+	e.prov.Wait()
+	e.step(t, 1)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateRolling {
+		t.Fatalf("release = %+v: a restart the control plane asked for halted the rollout", r)
+	}
+	if r := e.row(t, "0.8.0", "t01"); r.State != updater.RowUpdating || r.SoakStartedAt != nil {
+		t.Fatalf("row = %+v, want updating with the soak started over", r)
+	}
+	if e.instance(t, "t01").UnhealthyAt != nil {
+		t.Error("the canary was marked unhealthy for a restart the control plane asked for")
+	}
+	e.step(t, 1) // new baseline
+	e.advance(59 * time.Minute)
+	e.step(t, 1)
+	if got := e.rowState(t, "0.8.0", "t01"); got != updater.RowUpdating {
+		t.Fatalf("after 59 minutes of the new soak: %q", got)
+	}
+	e.advance(2 * time.Minute)
+	e.step(t, 1)
+	if got := e.rowState(t, "0.8.0", "t01"); got != updater.RowDone {
+		t.Fatalf("after the new soak: %q, want done", got)
+	}
+}
+
+// A canary that fails for any reason, not only in the soak, holds the next
+// rollout back; a failure further down the line does not.
+func TestEveryCanaryHaltIsRecordedAsUnhealthy(t *testing.T) {
+	e := newEnv(t, 1)
+	e.tenants(t, "t01", "t02")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.fake.SetPhase(job("t01"), nomadfake.Failed) // a failed deployment, no soak involved
+	e.step(t, 1)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateHalted {
+		t.Fatalf("release = %+v", r)
+	}
+	if e.instance(t, "t01").UnhealthyAt == nil {
+		t.Error("a canary whose deployment failed is not recorded as unhealthy")
+	}
+
+	e = newEnv(t, 1)
+	e.tenants(t, "t01", "t02")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 2) // canary done, batch 1 begins
+	e.fake.SetPhase(job("t02"), nomadfake.Failed)
+	e.step(t, 1)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateHalted || r.HaltedTenant != "t02" {
+		t.Fatalf("release = %+v", r)
+	}
+	if e.instance(t, "t02").UnhealthyAt != nil {
+		t.Error("a failure in a later batch was recorded as a canary failure")
+	}
+}
+
+func (e *env) override(t *testing.T, version string) {
+	t.Helper()
+	if err := e.tx(t, func(tx pgx.Tx) error { return e.upd.OverrideCanaryTx(context.Background(), tx, version) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTheOperatorCanOverrideTheCanaryGateAtStart(t *testing.T) {
+	e := newEnv(t, 5)
+	e.tenants(t, "t01", "t02")
+	e.release(t, "0.8.0", "")
+	if err := e.tx(t, func(tx pgx.Tx) error { return e.upd.SetCanaryTx(context.Background(), tx, "t01") }); err != nil {
+		t.Fatal(err)
+	}
+	e.markUnhealthy(t, "t01", 10*time.Minute)
+	if err := e.start(t, "0.8.0"); !errors.Is(err, updater.ErrCanaryUnhealthy) {
+		t.Fatalf("start = %v", err)
+	}
+	rel := e.release1(t, "0.8.0")
+	hold, err := e.upd.CanaryHold(context.Background(), rel)
+	if err != nil || hold == nil || hold.Tenant != "t01" || !hold.Until.Equal(e.clock().Add(50*time.Minute)) {
+		t.Fatalf("hold = %+v, %v", hold, err)
+	}
+	e.override(t, "0.8.0")
+	if h, _ := e.upd.CanaryHold(context.Background(), e.release1(t, "0.8.0")); h != nil {
+		t.Errorf("an overridden gate still holds: %+v", h)
+	}
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatalf("start after the override: %v", err)
+	}
+	if err := e.tx(t, func(tx pgx.Tx) error { return e.upd.OverrideCanaryTx(context.Background(), tx, "9.9.9") }); !errors.Is(err, updater.ErrNotFound) {
+		t.Errorf("override of an unknown release = %v", err)
+	}
+}
+
+func TestTheOperatorCanOverrideAHeldCompletion(t *testing.T) {
+	e := newEnv(t, 5)
+	e.tenants(t, "t01")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 1)
+	e.markUnhealthy(t, "t01", 5*time.Minute)
+	e.step(t, 3)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateRolling {
+		t.Fatalf("release = %+v, want held", r)
+	}
+	e.override(t, "0.8.0")
+	e.step(t, 1)
+	if r := e.release1(t, "0.8.0"); r.State != updater.StateDone || !r.IsTarget {
+		t.Fatalf("release after the override = %+v", r)
+	}
+	if err := e.tx(t, func(tx pgx.Tx) error { return e.upd.OverrideCanaryTx(context.Background(), tx, "0.8.0") }); !errors.Is(err, updater.ErrState) {
+		t.Errorf("override of a done release = %v, want ErrState", err)
+	}
+}
+
+// A release held back by the canary gate says so in the log, and not on
+// every pass.
+func TestAHeldReleaseIsLoggedOnceInAWhile(t *testing.T) {
+	var logs bytes.Buffer
+	e := newEnv(t, 5)
+	e.opt.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	e.upd = e.newUpdater()
+	e.tenants(t, "t01")
+	e.release(t, "0.8.0", "")
+	if err := e.start(t, "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	e.step(t, 1)
+	e.healthy("t01")
+	e.step(t, 1)
+	e.markUnhealthy(t, "t01", 5*time.Minute)
+	e.step(t, 5)
+	if n := strings.Count(logs.String(), "held back"); n != 1 {
+		t.Fatalf("%d log lines for a held release over five passes, want 1:\n%s", n, logs.String())
+	}
+	e.advance(11 * time.Minute)
+	e.step(t, 2)
+	if n := strings.Count(logs.String(), "held back"); n != 2 {
+		t.Errorf("%d log lines after eleven minutes, want 2", n)
 	}
 }

@@ -97,3 +97,32 @@ func TestReleaseCommand(t *testing.T) {
 		t.Errorf("%d releases, want the two valid ones", n)
 	}
 }
+
+func TestReleaseOverrideCanaryCommand(t *testing.T) {
+	ctx := context.Background()
+	pool := dbtest.Migrated(t)
+	a := auth.New(pool, auth.Options{MaxTenants: 5, BaseURL: "http://127.0.0.1:8090"})
+	svc := admin.New(pool, a)
+	svc.SetUpdater(updater.New(pool, nil, updater.Options{}))
+	var out bytes.Buffer
+	run := func(args ...string) error {
+		out.Reset()
+		return releaseCmd(ctx, svc, args, &out)
+	}
+	if err := run("add", "0.8.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("override-canary", "v0.8.0"); err != nil || !strings.Contains(out.String(), "overridden") {
+		t.Fatalf("override: %v %q", err, out.String())
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'rollout.canary_override' AND actor = 'cli' AND target = 'release:0.8.0'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("audit rows = %d, %v", n, err)
+	}
+	if err := run("override-canary", "9.9.9"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unknown release: %v", err)
+	}
+	if err := run("override-canary"); err == nil {
+		t.Error("no version accepted")
+	}
+}

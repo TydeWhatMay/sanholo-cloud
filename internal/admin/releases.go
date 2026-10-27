@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -65,6 +66,29 @@ func (s *Service) StartRollout(ctx context.Context, actor, version string) error
 			"tenants": sum.Pending, "skipped": sum.Skipped, "already_current": sum.Done, "batches": sum.Batches, "canary": sum.Canary,
 		})
 	})
+}
+
+// OverrideCanaryGate lets a release start, or complete, although the canary
+// tenant was unhealthy in the last hour. Audited.
+func (s *Service) OverrideCanaryGate(ctx context.Context, actor, version string) error {
+	if s.upd == nil {
+		return ErrState
+	}
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := s.upd.OverrideCanaryTx(ctx, tx, version); err != nil {
+			return mapUpdater(err)
+		}
+		return s.audit(ctx, tx, actor, "rollout.canary_override", "release:"+version, nil)
+	})
+}
+
+// CanaryHold is the canary gate's reason for a release, nil when open.
+func (s *Service) CanaryHold(ctx context.Context, r updater.Release) (*updater.Hold, error) {
+	if s.upd == nil {
+		return nil, nil
+	}
+	return s.upd.CanaryHold(ctx, r)
 }
 
 // ResumeRollout puts the halted rollout back to rolling.

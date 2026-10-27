@@ -832,6 +832,8 @@ func TestResume(t *testing.T) {
 	e.healthy("t02", "t03")
 	e.step(t, 3)
 	e.healthy("t02", "t03")
+	// The canary failed, so the release waits an hour before it completes.
+	e.advance(time.Hour + time.Minute)
 	e.step(t, 3)
 	if r := e.release1(t, "0.8.0"); r.State != updater.StateDone || !r.IsTarget {
 		t.Fatalf("release = %+v", r)
@@ -870,7 +872,9 @@ func TestAbandon(t *testing.T) {
 	if e.fake.Image(job("t01")) != oldImage || e.instance(t, "t01").ImageVersion != "0.7.1" {
 		t.Error("abandoning left t01 on the new version")
 	}
-	// The slot is free: the same release can be started again, and another.
+	// The slot is free: the same release can be started again, and another
+	// (once the canary that failed has been quiet for an hour).
+	e.advance(time.Hour + time.Minute)
 	e.release(t, "0.9.0", "")
 	if err := e.start(t, "0.9.0"); err != nil {
 		t.Errorf("start after abandon: %v", err)
@@ -1287,6 +1291,7 @@ func TestHaltAndCompleteAreAudited(t *testing.T) {
 	}
 	e.step(t, 1)
 	e.healthy("t01")
+	e.advance(time.Hour + time.Minute) // the canary failed an hour ago
 	e.step(t, 2)
 
 	var halt, complete string

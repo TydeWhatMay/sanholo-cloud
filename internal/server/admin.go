@@ -25,6 +25,7 @@ var adminNotices = map[string]string{
 	"unsuspend": "The tenant is active again.",
 	"restart":   "The bot is restarting.",
 	"release":   "The release is added.",
+	"override":  "The canary gate is overridden for the release.",
 	"rollout":   "The rollout is started.",
 	"resume":    "The rollout is resumed.",
 	"abandon":   "The rollout is abandoned.",
@@ -50,6 +51,7 @@ func (a *App) mountAdmin(app *fiber.App) {
 	adm.Post("/releases/resume", a.adminRolloutAction("resume", func(ctx context.Context, actor, _ string) error { return a.Admin.ResumeRollout(ctx, actor) }))
 	adm.Post("/releases/abandon", a.adminRolloutAction("abandon", func(ctx context.Context, actor, _ string) error { return a.Admin.AbandonRollout(ctx, actor) }))
 	adm.Post("/releases/:version/start", a.adminRolloutAction("rollout", a.Admin.StartRollout))
+	adm.Post("/releases/:version/override-canary", a.adminRolloutAction("override", a.Admin.OverrideCanaryGate))
 }
 
 // requireOperator answers anyone who is not an operator exactly as it
@@ -178,7 +180,7 @@ func (a *App) adminError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, admin.ErrRolloutActive):
 		return a.message(c, fiber.StatusConflict, "No change made", "Another rollout is rolling or halted. Finish it, or abandon it, first.")
 	case errors.Is(err, admin.ErrCanaryUnhealthy):
-		return a.message(c, fiber.StatusConflict, "No change made", "The canary tenant failed its health check in the last hour. Start the rollout when it has been healthy for an hour.")
+		return a.message(c, fiber.StatusConflict, "No change made", "The canary tenant failed its health check in the last hour. Start the rollout when it has been healthy for an hour, or override the canary gate on this page.")
 	case errors.Is(err, admin.ErrReleaseExists):
 		return a.message(c, fiber.StatusConflict, "No change made", "That release is already added.")
 	case errors.Is(err, admin.ErrReleaseInvalid):
@@ -196,6 +198,10 @@ type releaseRow struct {
 	Version, Digest, State, Added, Notes, URL string
 	Target, CanStart, Halted                  bool
 	HaltedTenant, HaltReason                  string
+	// Hold is why the canary gate keeps the release from starting or
+	// completing; CanOverride offers the override.
+	Hold        string
+	CanOverride bool
 }
 
 type rolloutRow struct {
@@ -218,6 +224,12 @@ func (a *App) adminReleases(c *fiber.Ctx) error {
 			CanStart: r.State == updater.StateAvailable || r.State == updater.StateDone,
 			Halted:   r.State == updater.StateHalted, HaltedTenant: r.HaltedTenant, HaltReason: r.HaltReason,
 		}
+		if hold, err := a.Admin.CanaryHold(c.UserContext(), r); err != nil {
+			return a.serverError(c)
+		} else if hold != nil {
+			row.Hold = "Held by the canary gate: tenant " + hold.Tenant + " was unhealthy in the last hour. It opens at " + hold.Until.UTC().Format(timeFmt) + "."
+		}
+		row.CanOverride = r.State != updater.StateDone && r.State != updater.StateHalted
 		if r.IsTarget {
 			target = "v" + r.Version
 		}

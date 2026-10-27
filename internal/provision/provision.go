@@ -96,7 +96,10 @@ type Options struct {
 	// because their job differs from the expected spec (a rotated proxy key
 	// touches every tenant; this spreads it out). Default 3.
 	DriftPerPass int
-	Logger       *slog.Logger
+	// LockSlots caps the tenants holding a lock at once. Default: the pool's
+	// connections minus two.
+	LockSlots int
+	Logger    *slog.Logger
 }
 
 // Service provisions tenant jobs. A nil *Service is disabled.
@@ -137,9 +140,15 @@ func New(pool *pgxpool.Pool, nc *nomad.Client, opt Options) (*Service, error) {
 		s.log = slog.New(slog.DiscardHandler)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	n := 1
-	if pool != nil {
-		n = max(1, int(pool.Config().MaxConns)/2)
+	// Each holder keeps a connection and its queries need another, so at
+	// most MaxConns-2 holders leave room for them (and for requests); the
+	// size can be set explicitly.
+	n := opt.LockSlots
+	if n <= 0 {
+		n = 1
+		if pool != nil {
+			n = max(1, int(pool.Config().MaxConns)-2)
+		}
 	}
 	s.lockSem = make(chan struct{}, n)
 	if !nc.Enabled() {
@@ -216,13 +225,17 @@ type Instance struct {
 	// RestartSeq counts restarts that registered the job again because no
 	// allocation was running; it is the job meta sanholo.restart.
 	RestartSeq int
+	// RestartRequestedAt is when the control plane last restarted the bot
+	// (a rotated token, a retry, an admin restart). Nomad counts such a
+	// restart like a crash, so a soak must not read it as one.
+	RestartRequestedAt *time.Time
 }
 
-const instanceCols = `tenant_id, job_id, image_version, image_digest, state, last_health, last_health_at, last_unhealthy_at, failure_reason, requested_at, updated_at, restart_seq`
+const instanceCols = `tenant_id, job_id, image_version, image_digest, state, last_health, last_health_at, last_unhealthy_at, failure_reason, requested_at, updated_at, restart_seq, restart_requested_at`
 
 func scanInstance(row pgx.Row) (*Instance, error) {
 	var i Instance
-	err := row.Scan(&i.TenantID, &i.JobID, &i.ImageVersion, &i.ImageDigest, &i.State, &i.Health, &i.HealthAt, &i.UnhealthyAt, &i.FailureReason, &i.RequestedAt, &i.UpdatedAt, &i.RestartSeq)
+	err := row.Scan(&i.TenantID, &i.JobID, &i.ImageVersion, &i.ImageDigest, &i.State, &i.Health, &i.HealthAt, &i.UnhealthyAt, &i.FailureReason, &i.RequestedAt, &i.UpdatedAt, &i.RestartSeq, &i.RestartRequestedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -334,6 +347,12 @@ var errVolume = errors.New("data volume")
 // job. The volume comes first: a job whose volume does not exist is accepted
 // by Nomad but never placed. Any failure is recorded on the instance.
 func (s *Service) register(ctx context.Context, tenantID string, job nomad.Job, force bool, what string) error {
+	if err := s.finishVolumeDeletion(ctx, tenantID); err != nil {
+		err = fmt.Errorf("%w: %w", errVolume, err)
+		s.fail(ctx, tenantID, reasonFor(err))
+		s.log.Warn("provision: could not delete the previous data volume", "tenant", tenantID, "error", err)
+		return fmt.Errorf("provision: volume: %w", err)
+	}
 	if _, err := s.nomad.EnsureHostVolume(ctx, tenantID, s.vol); err != nil {
 		err = fmt.Errorf("%w: %w", errVolume, err)
 		s.fail(ctx, tenantID, reasonFor(err))
@@ -348,16 +367,47 @@ func (s *Service) register(ctx context.Context, tenantID string, job nomad.Job, 
 	return nil
 }
 
+// lockRetry is how long a caller waits before trying a tenant's lock again.
+const lockRetry = 20 * time.Millisecond
+
 // lockTenant serialises the operations that register or change a tenant's
-// job (start, update, restart), across processes: a Start that read the
+// job (start, update, restart, stop), across processes: a Start that read the
 // instance before an Update must not register its old version after the
 // Update's. It is a PostgreSQL advisory lock on a connection of its own,
 // released by unlock or, if anything goes wrong, by closing the session.
+//
+// Lock order, for anything that takes more than one: this advisory lock
+// first, then the tenants row (SELECT ... FOR UPDATE). Nothing takes the row
+// and then this lock.
+//
+// A waiter holds nothing: it asks for a free slot and tries the lock without
+// blocking, and on either failure gives the connection and the slot back and
+// tries again shortly. A tenant whose holder is slow therefore costs the
+// others nothing but that one slot.
 func (s *Service) lockTenant(ctx context.Context, tenantID string) (unlock func(), err error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		unlock, err := s.tryLockTenant(ctx, tenantID)
+		if err != nil || unlock != nil {
+			return unlock, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(lockRetry):
+		}
+	}
+}
+
+// tryLockTenant returns (nil, nil) when no slot is free or another session
+// holds the lock.
+func (s *Service) tryLockTenant(ctx context.Context, tenantID string) (func(), error) {
 	select {
 	case s.lockSem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	default:
+		return nil, nil
 	}
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -365,12 +415,18 @@ func (s *Service) lockTenant(ctx context.Context, tenantID string) (unlock func(
 		return nil, fmt.Errorf("provision: lock: %w", err)
 	}
 	const key = `hashtextextended($1, 5381)`
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(`+key+`)`, tenantID); err != nil {
+	var got bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(`+key+`)`, tenantID).Scan(&got); err != nil {
 		// The lock may have been granted as the context ended; closing the
 		// session releases it for sure.
 		_ = conn.Hijack().Close(context.WithoutCancel(ctx))
 		<-s.lockSem
 		return nil, fmt.Errorf("provision: lock: %w", err)
+	}
+	if !got {
+		conn.Release()
+		<-s.lockSem
+		return nil, nil
 	}
 	return func() {
 		if _, err := conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(`+key+`)`, tenantID); err != nil {
@@ -380,6 +436,19 @@ func (s *Service) lockTenant(ctx context.Context, tenantID string) (unlock func(
 		}
 		<-s.lockSem
 	}, nil
+}
+
+// LockTenant is lockTenant for a caller that must hold the tenant's lock
+// across several steps (disconnect: stop the job, then delete the rows) and
+// uses StopLocked meanwhile.
+func (s *Service) LockTenant(ctx context.Context, tenantID string) (unlock func(), err error) {
+	if !s.Enabled() {
+		return nil, ErrDisabled
+	}
+	if !tenant.Valid(tenantID) {
+		return nil, ErrNotFound
+	}
+	return s.lockTenant(ctx, tenantID)
 }
 
 // ensureJob registers job unless Nomad already has exactly that spec and it
@@ -508,13 +577,24 @@ func (s *Service) hasQueued(tenantID string) bool {
 
 // supervise follows a pending instance until it is no longer pending, or
 // until a restart is queued behind it.
+//
+// It also ends when the instance is gone (the game account was disconnected
+// meanwhile) and after the provisioning timeout: a supervisor that never ended
+// would keep the tenant "in flight" and nothing could start it again.
 func (s *Service) supervise(ctx context.Context, tenantID string) {
+	deadline := time.Now().Add(s.timeout + 10*s.poll)
 	for {
 		inst, err := s.Refresh(ctx, tenantID)
 		if err != nil && ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, ErrNotFound) || (err == nil && inst == nil) {
+			return
+		}
 		if inst != nil && inst.State != StatePending {
+			return
+		}
+		if time.Now().After(deadline) {
 			return
 		}
 		if s.hasQueued(tenantID) {
@@ -671,6 +751,22 @@ func (s *Service) Stop(ctx context.Context, tenantID string, purge bool) error {
 	if !s.Enabled() {
 		return ErrDisabled
 	}
+	if !tenant.Valid(tenantID) {
+		return ErrNotFound
+	}
+	unlock, err := s.lockTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.StopLocked(ctx, tenantID, purge)
+}
+
+// StopLocked is Stop for a caller that holds the tenant's lock (LockTenant).
+func (s *Service) StopLocked(ctx context.Context, tenantID string, purge bool) error {
+	if !s.Enabled() {
+		return ErrDisabled
+	}
 	jobID, err := nomad.JobID(tenantID)
 	if err != nil {
 		return ErrNotFound
@@ -753,6 +849,11 @@ func (s *Service) restart(ctx context.Context, tenantID string, mark bool) error
 		if err := s.markPending(ctx, s.pool, tenantID); err != nil {
 			return err
 		}
+	}
+	// Recorded before Nomad is asked, so that an updater that sees the restart
+	// in the allocation's counter can already see why.
+	if _, err := s.pool.Exec(ctx, `UPDATE tenant_instances SET restart_requested_at = $2 WHERE tenant_id = $1`, tenantID, s.now()); err != nil {
+		return fmt.Errorf("provision: restart: %w", err)
 	}
 	st, err := s.nomad.Status(ctx, jobID)
 	if err != nil {

@@ -365,3 +365,22 @@ func TestJobRefusesABadDigest(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareVersions(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want int
+	}{
+		{"0.7.1", "0.7.1", 0}, {"0.7.1", "0.8.0", -1}, {"0.8.0", "0.7.1", 1},
+		{"0.9.0", "0.10.0", -1}, {"1.0.0", "0.99.99", 1},
+		{"0.8.0-rc.1", "0.8.0", -1}, {"0.8.0", "0.8.0-rc.1", 1},
+		{"0.8.0-rc.2", "0.8.0-rc.10", -1}, {"0.8.0-rc.1", "0.8.0-rc.1", 0},
+		{"0.8.0-alpha", "0.8.0-beta", -1}, {"0.8.0-1", "0.8.0-alpha", -1},
+		{"0.8.0-rc", "0.8.0-rc.1", -1},
+		{"junk", "0.8.0", 0}, {"0.8.0", "1.0", 0},
+	} {
+		if got := nomad.CompareVersions(tc.a, tc.b); got != tc.want {
+			t.Errorf("CompareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

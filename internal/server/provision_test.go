@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +17,28 @@ const nomadTok = "nomad-acl-SECRET-token-55aa"
 
 type provEnv struct {
 	*gameEnv
-	fake *nomadfake.Fake
-	prov *provision.Service
+	fake  *nomadfake.Fake
+	prov  *provision.Service
+	clock *testClock
+}
+
+// testClock is the connect service's clock, which the backoff of pending
+// deletions reads.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
 }
 
 // newProvEnv is a game environment whose app also provisions through a fake
@@ -40,7 +61,9 @@ func newProvEnv(t *testing.T) *provEnv {
 	g.admin.SetProvisioner(prov)
 	g.conn.SetProvisioner(prov)
 	g.app = New(g.pool, WithApp(&App{Auth: g.svc, Admin: g.admin, Connect: g.conn, Provision: prov}))
-	return &provEnv{g, fake, prov}
+	clock := &testClock{t: time.Now()}
+	g.conn.SetClock(clock.now)
+	return &provEnv{g, fake, prov, clock}
 }
 
 // connectGame validates and confirms tokenA-style tokens for c.

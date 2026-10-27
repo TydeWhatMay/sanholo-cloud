@@ -13,9 +13,13 @@
 <td>{{if .CanStart}}<form method="post" action="/admin/releases/{{.Version}}/start">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button class="plain" type="submit">Start rollout</button>
+</form>{{end}}{{if .CanOverride}}<form method="post" action="/admin/releases/{{.Version}}/override-canary">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button class="plain" type="submit">Override the canary gate</button>
 </form>{{end}}</td>
 </tr>
-{{end}}
+{{if .Hold}}<tr><td colspan="6">{{.Hold}}</td></tr>
+{{end}}{{end}}
 </table>
 {{else}}<p>There are no releases.</p>{{end}}
 {{if .Halted}}<p>The rollout is halted. The tenant that failed was put back on its previous version, and the tenants not yet reached were not touched.</p>

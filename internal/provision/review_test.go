@@ -536,3 +536,172 @@ func TestTheRestartCounterSurvivesEveryRender(t *testing.T) {
 		t.Errorf("fleet-target move: image %q counter %v", e.fake.Image(job("acme")), jobMeta(t, e, "acme")["sanholo.restart"])
 	}
 }
+
+// Stop takes the tenant's lock: a start that passed its checks before a
+// suspension must not register the job after the stop.
+func TestStopWaitsForAStartInFlight(t *testing.T) {
+	e := newEnv(t)
+	e.tenant(t, "acme", "active", true)
+	g := holdFirstRegistration(e)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var startErr, stopErr error
+	wg.Add(1)
+	go func() { defer wg.Done(); startErr = e.svc.Start(ctx, "acme") }()
+	<-g.reached
+	wg.Add(1)
+	go func() { defer wg.Done(); stopErr = e.svc.Stop(ctx, "acme", false) }()
+	time.Sleep(200 * time.Millisecond)
+	if n := e.fake.Count("DELETE", "/v1/job/"); n != 0 {
+		t.Errorf("%d stops reached Nomad while the start was in flight", n)
+	}
+	close(g.release)
+	wg.Wait()
+	if startErr != nil || stopErr != nil {
+		t.Fatalf("start %v, stop %v", startErr, stopErr)
+	}
+	if exists, stopped := e.fake.Has(job("acme")); !exists || !stopped {
+		t.Errorf("job exists %v stopped %v: the start registered it after the stop", exists, stopped)
+	}
+	if got := e.instance(t, "acme").State; got != provision.StateStopped {
+		t.Errorf("instance state = %q, want stopped", got)
+	}
+}
+
+// One tenant's slow holder and its waiters must not use up the slots the
+// other tenants need.
+func TestWaitersForOneTenantDoNotStarveTheOthers(t *testing.T) {
+	e := newEnv(t)
+	svc := e.otherSettings(t, func(o *provision.Options) { o.LockSlots = 2 })
+	e.tenant(t, "acme", "active", true)
+	e.tenant(t, "beta", "active", true)
+	g := holdFirstRegistration(e)
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(g.release) }) }
+	t.Cleanup(letGo) // a failing test must not leave the holder blocked
+	ctx := context.Background()
+	go func() { _ = svc.Start(ctx, "acme") }() // holds acme and one slot
+	<-g.reached
+	for range 3 { // three more callers for acme, all waiting
+		go func() { _ = svc.Update(ctx, "acme", "0.8.0", "") }()
+	}
+	time.Sleep(150 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- svc.Start(ctx, "beta") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second): // the holder lets go after 2 s, the Nomad client's timeout
+		t.Fatal("another tenant's start was starved by the waiters of a slow one")
+	}
+	letGo()
+}
+
+// Only forward: an abandoned rollout leaves tenants on a version newer than
+// the target, and they are not moved back.
+func TestLaggingConvergeNeverMovesATenantBackward(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.running(t, "acme") // 0.7.1
+	if err := e.svc.Update(ctx, "acme", "0.8.0", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.SetPhase(job("acme"), nomadfake.Healthy)
+	if _, err := e.svc.Refresh(ctx, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	e.release(t, "0.7.1", "done", true) // the target, older than what runs
+	posts := e.posts()
+	e.advance(2 * time.Minute)
+	e.svc.Reconcile(ctx)
+	if got := e.instance(t, "acme").ImageVersion; got != "0.8.0" || e.posts() != posts {
+		t.Errorf("version %q, %d registrations: a tenant was moved back to the older target", got, e.posts()-posts)
+	}
+	if n := countAudit(t, e, "instance.converge"); n != 0 {
+		t.Errorf("%d converge audit rows for no move", n)
+	}
+}
+
+func countAudit(t *testing.T, e *env, action string) int {
+	t.Helper()
+	var n int
+	if err := e.pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_log WHERE action = $1`, action).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestEveryConvergeMoveIsAudited(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.running(t, "acme")
+	e.release(t, "0.8.0", "done", true)
+	e.svc.Reconcile(ctx)
+	var actor, details string
+	if err := e.pool.QueryRow(ctx, `SELECT actor, details::text FROM audit_log WHERE action = 'instance.converge' AND target = 'tenant:acme'`).Scan(&actor, &details); err != nil {
+		t.Fatalf("no audit row for the move: %v", err)
+	}
+	if actor != provision.ActorReconcile || !strings.Contains(details, `"from": "0.7.1"`) || !strings.Contains(details, `"to": "0.8.0"`) {
+		t.Errorf("audit row = %s %s", actor, details)
+	}
+	// A drift fix is audited too.
+	e.running(t, "beta")
+	rotated := e.otherSettings(t, func(o *provision.Options) { o.Settings.ProxyPublicKeys = nomadfake.ProxyKeyPEM(2) })
+	rotated.Reconcile(ctx)
+	if n := countAudit(t, e, "instance.reregister"); n == 0 {
+		t.Error("a drift fix left no audit row")
+	}
+}
+
+// The follower of a start ends after the provisioning timeout even when
+// Nomad cannot be read, so the tenant is never left "in flight".
+func TestSuperviseEndsAfterTheTimeoutWhenNomadCannotBeRead(t *testing.T) {
+	e := newEnv(t)
+	svc := e.otherSettings(t, func(o *provision.Options) { o.Timeout = 100 * time.Millisecond })
+	e.tenant(t, "acme", "active", true)
+	var registered atomic.Bool
+	e.fake.Override(func(r nomadfake.Request) (int, string, bool) {
+		if registered.Load() {
+			return 503, "", true
+		}
+		if r.Method == "POST" && r.Path == "/v1/jobs" {
+			registered.Store(true)
+		}
+		return 0, "", false
+	})
+	svc.Trigger("acme")
+	done := make(chan struct{})
+	go func() { svc.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the follower of a start never ended")
+	}
+}
+
+// A follower that polls an instance whose record was deleted (the game
+// account was disconnected) must end, or the tenant stays "in flight" and
+// nothing starts it again.
+func TestSuperviseEndsWhenTheInstanceIsGone(t *testing.T) {
+	e := newEnv(t)
+	e.tenant(t, "acme", "active", true)
+	e.svc.Trigger("acme")
+	waitFor(t, "the job", func() bool { exists, _ := e.fake.Has(job("acme")); return exists })
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM tenant_instances WHERE tenant_id = 'acme'`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { e.svc.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the follower kept polling an instance that is gone")
+	}
+	// And the tenant can be started again.
+	e.svc.Trigger("acme")
+	waitFor(t, "a new instance record", func() bool { inst, _ := e.svc.Get(context.Background(), "acme"); return inst != nil })
+	e.fake.SetPhase(job("acme"), nomadfake.Healthy)
+	e.svc.Wait()
+}

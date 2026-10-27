@@ -214,13 +214,21 @@ func (s *Service) soakStep(ctx context.Context, rel Release, r Row) (halted bool
 	if r.SoakStartedAt == nil {
 		base, berr := s.prov.SoakBaseline(ctx, r.TenantID)
 		if berr != nil {
-			return false, nil // try again next pass; the health timeout still applies
+			// Try again next pass. Nomad being unreadable is then seen by
+			// poll's CheckUpdate, which applies the health timeout.
+			return false, nil
 		}
 		_, err = s.pool.Exec(ctx, `
 			UPDATE rollout_tenants SET soak_started_at = $3, soak_alloc = $4, soak_restarts = $5, updated_at = $3
 			WHERE release_version = $1 AND tenant_id = $2 AND state = 'updating'`,
 			rel.Version, r.TenantID, now, base.AllocID, base.Restarts)
 		return false, err
+	}
+	// The control plane restarts bots too (a rotated token, a retry, an admin
+	// restart), and Nomad counts those like crashes. A restart it asked for
+	// since the baseline is not the update's fault: the soak starts over.
+	if s.restartedSince(ctx, r) {
+		return false, s.rebaseline(ctx, rel, r)
 	}
 	verdict, cerr := s.prov.CheckSoak(ctx, r.TenantID, provision.SoakBase{AllocID: r.SoakAlloc, Restarts: r.SoakRestarts})
 	switch {
@@ -229,13 +237,41 @@ func (s *Service) soakStep(ctx context.Context, rel Release, r Row) (halted bool
 	case cerr != nil:
 		return false, nil
 	case verdict != provision.SoakOK:
-		s.prov.MarkUnhealthy(ctx, r.TenantID)
+		// Asked for after the read above and before the check: the request is
+		// recorded before Nomad is asked, so it is visible by now.
+		if s.restartedSince(ctx, r) {
+			return false, s.rebaseline(ctx, rel, r)
+		}
 		return true, s.halt(ctx, rel, r, provision.SoakReason(verdict))
 	case now.Sub(*r.SoakStartedAt) >= d:
 		_, err = s.setRow(ctx, rel, r, RowUpdating, RowDone, "", false)
 		return false, err
 	}
 	return false, nil
+}
+
+// restartedSince: the control plane restarted the tenant's bot after the
+// soak's baseline was taken.
+func (s *Service) restartedSince(ctx context.Context, r Row) bool {
+	if r.SoakStartedAt == nil {
+		return false
+	}
+	inst, err := s.prov.Get(ctx, r.TenantID)
+	return err == nil && inst != nil && inst.RestartRequestedAt != nil && inst.RestartRequestedAt.After(*r.SoakStartedAt)
+}
+
+// rebaseline throws the soak away so the next pass takes a new baseline and
+// starts the clock again, and gives the tenant a fresh window to become
+// healthy again.
+func (s *Service) rebaseline(ctx context.Context, rel Release, r Row) error {
+	now := s.now()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE rollout_tenants SET soak_started_at = NULL, soak_alloc = '', soak_restarts = 0, started_at = $3, updated_at = $3
+		WHERE release_version = $1 AND tenant_id = $2 AND state = 'updating'`, rel.Version, r.TenantID, now)
+	if err != nil {
+		return fmt.Errorf("updater: restart the soak: %w", err)
+	}
+	return nil
 }
 
 // halt records a failure and stops the rollout. In one transaction: the
@@ -245,6 +281,12 @@ func (s *Service) soakStep(ctx context.Context, rel Release, r Row) (halted bool
 func (s *Service) halt(ctx context.Context, rel Release, r Row, reason string) error {
 	ctx = context.WithoutCancel(ctx)
 	now := s.now()
+	// A canary that fails for any reason (soak, timeout, failed or reverted
+	// deployment, refused registration) holds the next rollout back for an
+	// hour.
+	if r.Batch == 0 {
+		s.prov.MarkUnhealthy(ctx, r.TenantID)
+	}
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var state string
 		if err := tx.QueryRow(ctx, `SELECT state FROM releases WHERE version = $1 FOR UPDATE`, rel.Version).Scan(&state); err != nil {
@@ -364,9 +406,14 @@ func (s *Service) finish(ctx context.Context, rel Release) error {
 		now := s.now()
 		if recent, err := canaryRecentlyUnhealthy(ctx, tx, rel.Version, now); err != nil {
 			return err
-		} else if recent {
+		} else if recent && !rel.CanaryOverride {
 			// The canary was unhealthy lately: the release does not become
-			// the fleet target yet. It completes on a later pass.
+			// the fleet target yet. It completes on a later pass, or when the
+			// operator overrides the gate. Said in the log (not every pass).
+			if now.Sub(s.heldLogged) > 10*time.Minute {
+				s.heldLogged = now
+				s.log.Warn("updater: the release is held back: the canary tenant was unhealthy in the last hour; wait, or override the canary gate", "release", rel.Version)
+			}
 			return nil
 		}
 		if _, err := tx.Exec(ctx, `UPDATE releases SET is_target = false, updated_at = $1 WHERE is_target AND version <> $2`, now, rel.Version); err != nil {

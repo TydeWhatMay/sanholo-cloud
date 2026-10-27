@@ -209,15 +209,19 @@ func (f *Fake) handle(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	rec := Request{Method: r.Method, URL: r.URL.RequestURI(), Header: r.Header.Clone(), Body: string(b)}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, rec)
-
-	if f.override != nil {
-		if status, body, ok := f.override(rec); ok {
+	ov := f.override
+	f.mu.Unlock()
+	// The override runs unlocked, so a test can hold a request in flight
+	// (a slow purge) while others are served.
+	if ov != nil {
+		if status, body, ok := ov(rec); ok {
 			reply(w, status, body)
 			return
 		}
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	p := r.URL.Path
 	if p == healthPath {
 		out, _ := json.Marshal(map[string]bool{"initialized": f.initialized, "sealed": f.sealed})
