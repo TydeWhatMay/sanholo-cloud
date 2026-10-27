@@ -54,7 +54,7 @@ curl http://127.0.0.1:8090/readyz    # 200 only when the database answers
 ### Sign-up and sign-in
 
 Pages: `/` (waiting list), `/waitlist`, `/signup`, `/signin`,
-`/signin/verify` (the emailed link), `/account` (sessions, passkeys), `/signout`.
+`/signin/verify` (the emailed link), `/account` (sessions, passkeys), `/signout`, and the legal pages `/privacy`, `/terms` and `/imprint`.
 The emailed link opens a page with one button; the button signs in. Mail goes through the `mail_outbox` table and a worker that retries with
 backoff. A sign-in request stores only a hash of the address; a worker turns
 it into a link and a queued email when an account exists, so the HTTP answer
