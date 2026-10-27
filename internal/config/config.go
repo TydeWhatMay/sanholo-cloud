@@ -11,10 +11,14 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/game"
+	"github.com/lhaig/sanholo-cloud/internal/nomad"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 )
 
@@ -37,6 +41,9 @@ type Config struct {
 	// GameURL is the Replicant Space API origin (GAME_API_URL), without a
 	// trailing slash.
 	GameURL string
+	// Nomad is the route to tenant provisioning. Empty Client.Addr means
+	// provisioning is disabled (development only; production requires it).
+	Nomad Nomad
 	// WebAuthn holds the passkey relying-party settings. Enabled is false
 	// when no usable relying party exists (development on a bare IP).
 	WebAuthn WebAuthn
@@ -69,6 +76,20 @@ type QM struct {
 	Token        string
 	TokenFile    string
 }
+
+// Nomad holds the provisioning settings. Client.Token is a secret: never log
+// or print a Config. Job holds only public values.
+type Nomad struct {
+	Client nomad.Config
+	Job    nomad.JobSettings
+	// Version is the image version new instances start at.
+	Version string
+	// Timeout is how long an instance may take to become healthy.
+	Timeout time.Duration
+}
+
+// Enabled reports whether tenant jobs will be registered.
+func (n Nomad) Enabled() bool { return n.Client.Addr != "" }
 
 // WebAuthn is the relying party for passkeys. RPID is the registrable domain
 // the credentials are bound to; RPOrigin is the exact origin the browser
@@ -201,6 +222,11 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, err)
 	}
 	c.WebAuthn = wa
+	nm, err := nomadSettings(getenv, c.AppBaseURL, c.QM.Addr, c.Production)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Nomad = nm
 	if c.Production {
 		if len(c.TrustedProxies) == 0 {
 			errs = append(errs, errors.New("TRUSTED_PROXIES is required when APP_ENV=production: without it every client shares the edge's rate-limit key"))
@@ -211,6 +237,9 @@ func Load(getenv func(string) string) (Config, error) {
 		if c.SMTP.Host != "" && c.SMTP.Username == "" {
 			errs = append(errs, errors.New("SMTP_USERNAME is required when APP_ENV=production: mail must be authenticated"))
 		}
+	}
+	if c.Production && !c.Nomad.Enabled() {
+		errs = append(errs, errors.New("NOMAD_ADDR is required when APP_ENV=production: tenant bots are started through Nomad"))
 	}
 	if c.Production && c.QM.Addr == "" {
 		errs = append(errs, errors.New("QM_ADDR is required when APP_ENV=production: customer game tokens are stored in qm"))
@@ -264,6 +293,118 @@ func qmSettings(getenv func(string) string, production bool) (QM, error) {
 		return QM{}, errors.New("QM_ADDR is set: set QM_ROLE_ID with QM_SECRET_ID or QM_SECRET_ID_FILE (in development, exactly one of QM_TOKEN and QM_TOKEN_FILE instead)")
 	}
 	return q, nil
+}
+
+// nomadSettings reads the provisioning variables. With no NOMAD_ADDR
+// provisioning is disabled and any other provisioning variable that needs it
+// is an error. Errors never include a value.
+//
+//	NOMAD_ADDR, NOMAD_TOKEN or NOMAD_TOKEN_FILE, NOMAD_NAMESPACE (default
+//	sanholo), NOMAD_REGION, NOMAD_DATACENTERS (default dc1), NOMAD_HOST_NETWORK,
+//	SANHOLO_IMAGE_VERSION, SANHOLO_IMAGE_REPO, TENANT_PROXY_PUBLIC_KEYS or
+//	TENANT_PROXY_PUBLIC_KEYS_FILE, TENANT_DOMAIN, TENANT_ALERT_URL,
+//	VAPID_PUBLIC_KEY, TENANT_MEMORY_MB, TENANT_CPU_MHZ, PROVISION_TIMEOUT.
+func nomadSettings(getenv func(string) string, appBase, qmAddr string, production bool) (Nomad, error) {
+	n := Nomad{Client: nomad.Config{
+		Addr: getenv("NOMAD_ADDR"), Token: getenv("NOMAD_TOKEN"), TokenFile: getenv("NOMAD_TOKEN_FILE"),
+		Namespace: getenv("NOMAD_NAMESPACE"), Region: getenv("NOMAD_REGION"),
+	}}
+	if n.Client.Addr == "" {
+		for _, name := range []string{"NOMAD_TOKEN", "NOMAD_TOKEN_FILE", "NOMAD_NAMESPACE", "NOMAD_REGION", "NOMAD_DATACENTERS", "SANHOLO_IMAGE_VERSION"} {
+			if getenv(name) != "" {
+				return Nomad{}, fmt.Errorf("%s is set but NOMAD_ADDR is not", name)
+			}
+		}
+		return Nomad{}, nil
+	}
+	var errs []error
+	addr, err := nomad.ParseAddr(n.Client.Addr)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("NOMAD_ADDR: %w", err))
+	}
+	n.Client.Addr = addr
+	if (n.Client.Token == "") == (n.Client.TokenFile == "") {
+		errs = append(errs, errors.New("NOMAD_ADDR is set: set exactly one of NOMAD_TOKEN and NOMAD_TOKEN_FILE"))
+	}
+	if n.Client.Namespace == "" {
+		n.Client.Namespace = nomad.DefaultNamespace
+	}
+	j := nomad.JobSettings{
+		Namespace: n.Client.Namespace, Region: n.Client.Region, Datacenters: []string{"dc1"},
+		ImageRepo: nomad.DefaultImageRepo, HostNetwork: getenv("NOMAD_HOST_NETWORK"),
+		QMAddr: qmAddr, TenantDomain: "sanholo.space", MemoryMB: 384, CPUMHz: 300,
+		VAPIDPublicKey: getenv("VAPID_PUBLIC_KEY"), AlertURL: appBase + "/internal/alerts",
+	}
+	if v := getenv("NOMAD_DATACENTERS"); v != "" {
+		j.Datacenters = nil
+		for _, d := range strings.Split(v, ",") {
+			j.Datacenters = append(j.Datacenters, strings.TrimSpace(d))
+		}
+	}
+	if v := getenv("SANHOLO_IMAGE_REPO"); v != "" {
+		j.ImageRepo = v
+	}
+	if v := getenv("TENANT_DOMAIN"); v != "" {
+		j.TenantDomain = v
+	}
+	if v := getenv("TENANT_ALERT_URL"); v != "" {
+		j.AlertURL = v
+	}
+	for _, p := range []struct {
+		name string
+		dst  *int
+	}{{"TENANT_MEMORY_MB", &j.MemoryMB}, {"TENANT_CPU_MHZ", &j.CPUMHz}} {
+		if err := positiveInt(getenv, p.name, p.dst); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	keys, kerr := proxyKeys(getenv)
+	if kerr != nil {
+		errs = append(errs, kerr)
+	}
+	j.ProxyPublicKeys = keys
+	if qmAddr == "" {
+		errs = append(errs, errors.New("NOMAD_ADDR is set: QM_ADDR is required too, tenant bots read their game token from qm"))
+	}
+	if v, err := nomad.NormalizeVersion(getenv("SANHOLO_IMAGE_VERSION")); err != nil {
+		errs = append(errs, errors.New("SANHOLO_IMAGE_VERSION is required and must look like 0.7.1"))
+	} else {
+		n.Version = v
+	}
+	n.Timeout = 15 * time.Minute
+	if v := getenv("PROVISION_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > 6*time.Hour {
+			errs = append(errs, errors.New("PROVISION_TIMEOUT: want a duration from 1m to 6h"))
+		}
+		n.Timeout = d
+	}
+	// Validate only once every input is in: a missing key would repeat as a
+	// second error.
+	if kerr == nil && len(errs) == 0 {
+		if err := j.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("tenant job settings: %w", err))
+		}
+	}
+	n.Job = j
+	return n, errors.Join(errs...)
+}
+
+// proxyKeys reads the proxy's public key(s), inline or from a file: public
+// values, but exactly one source so a stale copy cannot hide.
+func proxyKeys(getenv func(string) string) (string, error) {
+	inline, file := getenv("TENANT_PROXY_PUBLIC_KEYS"), getenv("TENANT_PROXY_PUBLIC_KEYS_FILE")
+	switch {
+	case (inline == "") == (file == ""):
+		return "", errors.New("NOMAD_ADDR is set: set exactly one of TENANT_PROXY_PUBLIC_KEYS and TENANT_PROXY_PUBLIC_KEYS_FILE")
+	case inline != "":
+		return inline, nil
+	}
+	raw, err := os.ReadFile(filepath.Clean(file))
+	if err != nil {
+		return "", errors.New("TENANT_PROXY_PUBLIC_KEYS_FILE: cannot read the file")
+	}
+	return string(raw), nil
 }
 
 // webAuthn reads WEBAUTHN_RP_ID, WEBAUTHN_RP_ORIGIN and WEBAUTHN_RP_NAME.

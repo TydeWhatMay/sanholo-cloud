@@ -20,6 +20,7 @@ var adminNotices = map[string]string{
 	"resend":    "A new invite email is queued. The earlier invite no longer works.",
 	"suspend":   "The tenant is suspended.",
 	"unsuspend": "The tenant is active again.",
+	"restart":   "The bot is restarting.",
 }
 
 func (a *App) mountAdmin(app *fiber.App) {
@@ -34,6 +35,7 @@ func (a *App) mountAdmin(app *fiber.App) {
 	adm.Post("/waitlist/resend", a.adminInvite("resend", a.Admin.ResendInvite))
 	adm.Post("/tenants/:id/suspend", a.adminTenantAction("suspend", a.Admin.Suspend))
 	adm.Post("/tenants/:id/unsuspend", a.adminTenantAction("unsuspend", a.Admin.Unsuspend))
+	adm.Post("/tenants/:id/restart", a.adminTenantAction("restart", a.Admin.RestartInstance))
 }
 
 // requireOperator answers anyone who is not an operator exactly as it
@@ -62,14 +64,30 @@ func (a *App) adminTenants(c *fiber.Ctx) error {
 	if err != nil {
 		return a.serverError(c)
 	}
-	type row struct{ ID, Email, Created, Status, Game string }
+	type row struct {
+		ID, Email, Created, Status, Game string
+		Instance, Health                 string
+		CanRestart                       bool
+	}
 	rows := make([]row, 0, len(list))
 	for _, t := range list {
 		game := ""
 		if t.GameCode != "" {
 			game = t.GameName + " (" + t.GameCode + ")"
 		}
-		rows = append(rows, row{t.ID, t.Email, t.CreatedAt.UTC().Format(timeFmt), t.Status, game})
+		r := row{ID: t.ID, Email: t.Email, Created: t.CreatedAt.UTC().Format(timeFmt), Status: t.Status, Game: game}
+		if t.InstanceState != "" {
+			r.Instance = t.InstanceState + " (v" + t.InstanceVersion + ")"
+			if t.InstanceReason != "" {
+				r.Instance += ": " + t.InstanceReason
+			}
+			r.Health = t.InstanceHealth
+			if t.InstanceHealthAt != nil {
+				r.Health += ", " + t.InstanceHealthAt.UTC().Format(timeFmt)
+			}
+			r.CanRestart = t.InstanceState != "stopped"
+		}
+		rows = append(rows, r)
 	}
 	return a.adminPage(c, "admin_tenants", "Tenants", fiber.Map{"Tenants": rows})
 }
@@ -137,6 +155,8 @@ func (a *App) adminError(c *fiber.Ctx, err error) error {
 		return a.message(c, fiber.StatusNotFound, "Not found", "No such tenant, address or invite.")
 	case errors.Is(err, admin.ErrState):
 		return a.message(c, fiber.StatusConflict, "No change made", "The tenant is not in a state where this applies.")
+	case errors.Is(err, admin.ErrRestart):
+		return a.message(c, fiber.StatusBadGateway, "Restart not carried out", "The restart was recorded, but Nomad did not carry it out. The instance state shows what happened.")
 	case errors.Is(err, admin.ErrOwnTenant):
 		return a.message(c, fiber.StatusConflict, "No change made", "You cannot suspend your own tenant.")
 	case errors.Is(err, auth.ErrAccountExists):

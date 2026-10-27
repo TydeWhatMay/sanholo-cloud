@@ -1,0 +1,182 @@
+{
+  "Job": {
+    "ID": "sanholo-tenant-acme-42",
+    "Name": "sanholo-tenant-acme-42",
+    "Namespace": "sanholo",
+    "Datacenters": [
+      "dc1"
+    ],
+    "Type": "service",
+    "Priority": 50,
+    "Meta": {
+      "sanholo.spec": "2404f65db2b78267bbd2e47a531089c7cf29538ab8dbcb1634d09b187eeb57d6",
+      "sanholo.tenant": "acme-42",
+      "sanholo.version": "0.7.1"
+    },
+    "TaskGroups": [
+      {
+        "Name": "bot",
+        "Count": 1,
+        "Networks": [
+          {
+            "Mode": "bridge",
+            "DynamicPorts": [
+              {
+                "Label": "http",
+                "To": 8080,
+                "HostNetwork": "private"
+              }
+            ]
+          }
+        ],
+        "Volumes": {
+          "data": {
+            "Name": "data",
+            "Type": "host",
+            "Source": "sanholo-tenant-acme-42",
+            "ReadOnly": false
+          }
+        },
+        "RestartPolicy": {
+          "Attempts": 3,
+          "Interval": 600000000000,
+          "Delay": 15000000000,
+          "Mode": "fail"
+        },
+        "ReschedulePolicy": {
+          "Delay": 30000000000,
+          "DelayFunction": "exponential",
+          "MaxDelay": 3600000000000,
+          "Unlimited": true
+        },
+        "Update": {
+          "MaxParallel": 1,
+          "HealthCheck": "checks",
+          "MinHealthyTime": 30000000000,
+          "HealthyDeadline": 600000000000,
+          "ProgressDeadline": 900000000000,
+          "AutoRevert": true,
+          "AutoPromote": false
+        },
+        "Services": [
+          {
+            "Name": "sanholo-bot",
+            "PortLabel": "http",
+            "Provider": "nomad",
+            "AddressMode": "host",
+            "Tags": [
+              "tenant=acme-42"
+            ],
+            "Checks": [
+              {
+                "Name": "healthz",
+                "Type": "http",
+                "Protocol": "http",
+                "Method": "GET",
+                "Path": "/healthz",
+                "PortLabel": "http",
+                "Interval": 15000000000,
+                "Timeout": 5000000000,
+                "CheckRestart": {
+                  "Limit": 8,
+                  "Grace": 120000000000,
+                  "IgnoreWarnings": false
+                }
+              }
+            ]
+          }
+        ],
+        "Tasks": [
+          {
+            "Name": "bot",
+            "Driver": "docker",
+            "Config": {
+              "args": [
+                "serve",
+                "-hosted",
+                "-live",
+                "-addr",
+                "0.0.0.0:8080",
+                "-hosted-allow-any-bind",
+                "-hosted-tenant",
+                "acme-42",
+                "-hosted-proxy-pubkey",
+                "${NOMAD_TASK_DIR}/proxy-pubkey.pem",
+                "-credentials-source",
+                "qm",
+                "-qm-addr",
+                "https://qm.example.org:8200",
+                "-qm-auth-mount",
+                "nomad",
+                "-qm-role",
+                "sanholo-tenant",
+                "-qm-identity-file",
+                "${NOMAD_SECRETS_DIR}/nomad_qm.sanholo.jwt",
+                "-hosted-alert-url",
+                "https://app.example.org/internal/alerts",
+                "-hosted-alert-identity-file",
+                "${NOMAD_SECRETS_DIR}/nomad_sanholo.cloud.jwt",
+                "-public-url",
+                "https://acme-42.sanholo.space",
+                "-catalog",
+                "/data/catalog.db",
+                "-hosted-vapid-public-key",
+                "BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A"
+              ],
+              "cap_drop": [
+                "ALL"
+              ],
+              "image": "ghcr.io/tydewhatmay/sanholo:v0.7.1",
+              "security_opt": [
+                "no-new-privileges"
+              ]
+            },
+            "Identities": [
+              {
+                "Name": "qm.sanholo",
+                "Audience": [
+                  "qm.sanholo"
+                ],
+                "File": true,
+                "TTL": 3600000000000
+              },
+              {
+                "Name": "sanholo.cloud",
+                "Audience": [
+                  "sanholo.cloud"
+                ],
+                "File": true,
+                "TTL": 3600000000000
+              }
+            ],
+            "Templates": [
+              {
+                "EmbeddedTmpl": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAzswVB9wd3XKVlRwpCIjwla25BE0bc9aW5t8GXWg71Pw=\n-----END PUBLIC KEY-----\n",
+                "DestPath": "local/proxy-pubkey.pem",
+                "ChangeMode": "noop",
+                "Perms": "0644"
+              }
+            ],
+            "VolumeMounts": [
+              {
+                "Volume": "data",
+                "Destination": "/data",
+                "ReadOnly": false
+              }
+            ],
+            "Resources": {
+              "CPU": 300,
+              "MemoryMB": 384
+            },
+            "LogConfig": {
+              "MaxFiles": 3,
+              "MaxFileSizeMB": 10
+            },
+            "KillTimeout": 20000000000,
+            "KillSignal": "SIGTERM"
+          }
+        ]
+      }
+    ]
+  }
+}

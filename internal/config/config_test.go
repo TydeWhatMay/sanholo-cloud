@@ -175,6 +175,8 @@ func TestLoadHostedSettings(t *testing.T) {
 			"APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw",
 			"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8",
 			"QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "role-1", "QM_SECRET_ID_FILE": "/run/secrets/qm-secret-id",
+			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "tok", "SANHOLO_IMAGE_VERSION": "0.7.1",
+			"TENANT_PROXY_PUBLIC_KEYS": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
 		}
 		if key != "" {
 			m[key] = val
@@ -225,6 +227,8 @@ func TestLoadHostedSettings(t *testing.T) {
 			"SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw", "SMTP_FROM": "SanHolo <no-reply@sanholo.space>",
 			"APP_BASE_URL": "https://app.sanholo.space", "WEBAUTHN_RP_ID": "app.sanholo.space",
 			"TRUSTED_PROXIES": "10.0.0.0/8", "QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "r", "QM_SECRET_ID": "s",
+			"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "t", "SANHOLO_IMAGE_VERSION": "0.7.1",
+			"TENANT_PROXY_PUBLIC_KEYS": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
 		}), "", func(t *testing.T, c Config) {
 			if !c.Production || c.SMTP.Port != "465" || c.SMTP.Username != "u" || c.SMTP.Password != "pw" {
 				t.Errorf("SMTP=%+v", c.SMTP)

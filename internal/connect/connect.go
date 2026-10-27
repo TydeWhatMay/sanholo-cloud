@@ -93,6 +93,9 @@ type Connected struct {
 	ReplicantName string
 	ReplicantCode string
 	ConnectedAt   time.Time
+	// Reconnect is true when this confirmation replaced the token of a game
+	// account the tenant already had (Confirm only).
+	Reconnect bool
 }
 
 // Begin validates token with one game read and, if the game account may be
@@ -245,7 +248,7 @@ func (s *Service) store(ctx context.Context, e pendingEntry) (Connected, error) 
 		return Connected{}, ErrStore
 	}
 	s.log.Info("connect: game account connected", "tenant", e.tenantID, "reconnect", reconnect)
-	return Connected{ReplicantName: e.acct.ReplicantName, ReplicantCode: e.acct.ReplicantCode, ConnectedAt: now}, nil
+	return Connected{ReplicantName: e.acct.ReplicantName, ReplicantCode: e.acct.ReplicantCode, ConnectedAt: now, Reconnect: reconnect}, nil
 }
 
 // mayHaveWritten: the qm request may have landed although we saw an error

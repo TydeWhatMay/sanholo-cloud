@@ -33,6 +33,13 @@ for them.
 | `QM_ADDR` | Origin of the dedicated qm that holds customer game tokens: `https`, or `http` on a loopback host. Unset in development: secrets are disabled (the service starts; operations return `ErrSecretsUnavailable`). Required when `APP_ENV=production`. |
 | `QM_ROLE_ID`, `QM_SECRET_ID`, `QM_SECRET_ID_FILE` | The control plane's qm AppRole (`sanholo-provisioner`): the role id and exactly one of the secret id or a file holding it (re-read on every login). The service logs in with `POST /qm/v1/auth/approle/login`, sends the client token as `X-QM-Token`, renews it with `renew-self` past two thirds of its lease and logs in again when qm rejects it (once per request). Required with `QM_ADDR` when `APP_ENV=production`. The principal is write-only; none of these values is logged. |
 | `QM_TOKEN`, `QM_TOKEN_FILE` | A static qm client token, exactly one of the two, for development and tests only. Refused when `APP_ENV=production`, and never combined with the AppRole variables. |
+| `NOMAD_ADDR` | Nomad origin (`https`, or `http` on loopback). Unset in development: provisioning is disabled, the service starts and tenants stay "not provisioned". Required when `APP_ENV=production`. With it set, `QM_ADDR`, `SANHOLO_IMAGE_VERSION` and a proxy key (below) are required too. |
+| `NOMAD_TOKEN`, `NOMAD_TOKEN_FILE` | The control plane's Nomad ACL token, limited to the tenant namespace; exactly one of the two (the file is re-read on every request). Never logged. |
+| `NOMAD_NAMESPACE`, `NOMAD_REGION`, `NOMAD_DATACENTERS`, `NOMAD_HOST_NETWORK` | Namespace (default `sanholo`), region, datacenters (default `dc1`) and the host network the bot port is mapped onto. |
+| `SANHOLO_IMAGE_VERSION`, `SANHOLO_IMAGE_REPO` | Version new instances start at (`0.7.1` or `v0.7.1`) and the image repository (default `ghcr.io/tydewhatmay/sanholo`). |
+| `TENANT_PROXY_PUBLIC_KEYS`, `TENANT_PROXY_PUBLIC_KEYS_FILE` | The proxy's Ed25519 public key(s), exactly one of the two. |
+| `TENANT_DOMAIN`, `TENANT_ALERT_URL`, `VAPID_PUBLIC_KEY` | Public-URL domain (default `sanholo.space`), alert endpoint (default `APP_BASE_URL/internal/alerts`) and the Web Push public key handed to the bots. |
+| `TENANT_MEMORY_MB`, `TENANT_CPU_MHZ`, `PROVISION_TIMEOUT` | Bot resources (384, 300) and how long a bot may take to become healthy (15m). |
 | `WEBAUTHN_RP_ID` | Passkey relying-party id: a domain, such as `app.sanholo.space`. Credentials are bound to it; changing it orphans every passkey. Default: the host of `WEBAUTHN_RP_ORIGIN`. A bare IP host cannot be an id, so passkeys stay off. Required when `APP_ENV=production`. |
 | `WEBAUTHN_RP_ORIGIN` | Exact origin the browser reports. `https`, or `http` for `localhost` only. Its host must be the id or a subdomain of it. Default: `APP_BASE_URL`. |
 | `WEBAUTHN_RP_NAME` | Name shown by the authenticator. Default `SanHolo`. |
@@ -149,6 +156,28 @@ for a tenant that has one is refused (beta limit: one). Connecting the same
 game account again with a new token is a new `secrets.Put` (a new version). Without `QM_ADDR`
 the section says connecting is not available. "Create a new account" is not
 built: it waits on the developer's answer about registrations per IP.
+
+### Provisioning
+
+Confirming a game account starts the customer's bot in the background
+(`internal/provision`): the control plane builds the Nomad job for
+`sanholo-tenant-<id>` in Go (`internal/nomad/job.go`; the golden file is
+`internal/nomad/testdata/job.golden.json`, regenerate with
+`go test ./internal/nomad -update`), registers it through the Nomad HTTP API
+with the job's modify index, and records the instance in `tenant_instances`
+(job, image version, state `pending`, `running`, `failed` or `stopped`, last
+health, a fixed failure reason; no secrets). A re-registration of an unchanged
+job is skipped, and an existing instance keeps its image version. The account
+page shows the state and refreshes itself while the bot starts; a failed bot has
+a "Start the bot again" button. A new token for the same game account restarts
+the running bot, which reads the token from qm at start. A worker refreshes every
+instance each 30 seconds, so a bot that stops being healthy shows on `/admin`,
+where an operator can also restart it (audited in the same transaction as the
+state change). `provision.Service.Stop` stops (and with purge, forgets) a job;
+disconnect and delete use it. The job carries no secret: the bot's game token
+comes from qm through the Nomad workload identity. The Nomad client
+(`internal/nomad`) only touches jobs named `sanholo-tenant-<valid tenant id>`.
+What the platform must provide is in `deploy/README.md`.
 
 ### The gate
 

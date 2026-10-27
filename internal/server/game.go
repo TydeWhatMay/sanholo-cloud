@@ -9,6 +9,7 @@ import (
 
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/connect"
+	"github.com/lhaig/sanholo-cloud/internal/provision"
 )
 
 // gameCookie binds a validated, unconfirmed connection to the browser that
@@ -90,9 +91,22 @@ func (a *App) gameConfirm(c *fiber.Ctx) error {
 	if err != nil {
 		return a.gameError(c, err)
 	}
+	lines := []string{"SanHolo is connected to the replicant " + g.ReplicantName + " (" + g.ReplicantCode + ")."}
+	if a.Provision.Enabled() {
+		// After the commit, in the background: the account page shows the
+		// bot starting. A new token also restarts a running bot, which reads
+		// the token from the secrets store when it starts.
+		if g.Reconnect {
+			a.Provision.TriggerRestart(ses.TenantID)
+			lines = append(lines, "Your bot is restarting with the new token.")
+		} else {
+			a.Provision.Trigger(ses.TenantID)
+			lines = append(lines, "Your bot is starting. The account page shows its state.")
+		}
+	}
 	return a.render(c, fiber.StatusOK, "message", "Game account connected", fiber.Map{
 		"Heading": "Game account connected",
-		"Lines":   []string{"SanHolo is connected to the replicant " + g.ReplicantName + " (" + g.ReplicantCode + ")."},
+		"Lines":   lines,
 		"Link":    "/account", "LinkText": "Back to your account",
 	})
 }
@@ -134,4 +148,59 @@ func (a *App) gameError(c *fiber.Ctx, err error) error {
 			"SanHolo could not store the token. Nothing was saved. Enter the token again in a few minutes.")
 	}
 	return a.serverError(c)
+}
+
+const instanceRetryLimit = 10
+
+// instanceView is what the account page shows of the tenant's bot: a fixed
+// label, a fixed detail, and whether the page should keep polling.
+func (a *App) instanceView(c *fiber.Ctx) (fiber.Map, error) {
+	ses := c.Locals("session").(auth.Session)
+	if !a.Provision.Enabled() {
+		return fiber.Map{"Label": "Not provisioned", "Detail": "Running bots is not set up here."}, nil
+	}
+	inst, err := a.Provision.Get(c.UserContext(), ses.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	if inst == nil {
+		return fiber.Map{"Label": "Not started"}, nil
+	}
+	switch inst.State {
+	case provision.StatePending:
+		return fiber.Map{"Label": "Starting", "Detail": "This can take a few minutes. The page updates by itself.", "Starting": true}, nil
+	case provision.StateRunning:
+		if inst.Health == provision.HealthUnhealthy {
+			return fiber.Map{"Label": "Running, not answering", "Detail": "The bot is not passing its health check. SanHolo is watching it."}, nil
+		}
+		return fiber.Map{"Label": "Running"}, nil
+	case provision.StateFailed:
+		return fiber.Map{"Label": "Failed", "Detail": inst.FailureReason + ".", "CanRetry": true}, nil
+	}
+	return fiber.Map{"Label": "Stopped"}, nil
+}
+
+// instanceRetry starts a failed bot again. Only a failed instance can be
+// retried; a stopped one was stopped on purpose.
+func (a *App) instanceRetry(c *fiber.Ctx) error {
+	ses := c.Locals("session").(auth.Session)
+	if !a.Provision.Enabled() {
+		return c.Redirect("/account", fiber.StatusSeeOther)
+	}
+	ok, err := a.allow(c, "instance:retry:account:"+ses.AccountID, instanceRetryLimit)
+	if err != nil {
+		return a.serverError(c)
+	}
+	if !ok {
+		return a.message(c, fiber.StatusTooManyRequests, "Too many requests", "Wait an hour before trying again.")
+	}
+	inst, err := a.Provision.Get(c.UserContext(), ses.TenantID)
+	if err != nil {
+		return a.serverError(c)
+	}
+	if inst == nil || inst.State != provision.StateFailed {
+		return a.message(c, fiber.StatusConflict, "No change made", "Your bot is not in a failed state.")
+	}
+	a.Provision.Trigger(ses.TenantID)
+	return c.Redirect("/account", fiber.StatusSeeOther)
 }

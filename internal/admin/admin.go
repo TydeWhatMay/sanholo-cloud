@@ -16,6 +16,7 @@ import (
 
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
+	"github.com/lhaig/sanholo-cloud/internal/provision"
 )
 
 // ActorCLI is the audit actor of the operator command line.
@@ -33,12 +34,16 @@ var (
 	// ErrOwnTenant means an operator tried to suspend their own tenant,
 	// which would lock them out of /admin.
 	ErrOwnTenant = errors.New("an operator cannot suspend their own tenant")
+	// ErrRestart means the restart was recorded but Nomad did not carry it
+	// out; the instance state says what happened.
+	ErrRestart = errors.New("the restart could not be carried out")
 )
 
 // Service is the admin operations over one PostgreSQL pool.
 type Service struct {
 	pool *pgxpool.Pool
 	auth *auth.Service
+	prov *provision.Service
 	now  func() time.Time
 }
 
@@ -46,6 +51,10 @@ type Service struct {
 func New(pool *pgxpool.Pool, a *auth.Service) *Service {
 	return &Service{pool: pool, auth: a, now: time.Now}
 }
+
+// SetProvisioner gives the service the provisioner that RestartInstance
+// drives. Without one (or with provisioning disabled) restarts are refused.
+func (s *Service) SetProvisioner(p *provision.Service) { s.prov = p }
 
 // audit writes one row inside tx. details must not hold secrets.
 func (s *Service) audit(ctx context.Context, tx pgx.Tx, actor, action, target string, details map[string]any) error {
@@ -126,15 +135,26 @@ type Tenant struct {
 	// account is connected. Never a token: the database has none.
 	GameName string
 	GameCode string
+	// Instance is the Nomad job's record; empty InstanceState means the
+	// tenant is not provisioned. Health is Nomad's reading, Reason the
+	// fixed failure phrase. None of it is secret.
+	InstanceState    string
+	InstanceVersion  string
+	InstanceHealth   string
+	InstanceReason   string
+	InstanceHealthAt *time.Time
 }
 
 // Tenants lists every tenant, newest first.
 func (s *Service) Tenants(ctx context.Context) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT t.id, coalesce(a.email, ''), t.created_at, t.status,
-		       coalesce(g.replicant_name, ''), coalesce(g.replicant_code, '')
+		       coalesce(g.replicant_name, ''), coalesce(g.replicant_code, ''),
+		       coalesce(i.state, ''), coalesce(i.image_version, ''), coalesce(i.last_health, ''),
+		       coalesce(i.failure_reason, ''), i.last_health_at
 		FROM tenants t LEFT JOIN accounts a ON a.tenant_id = t.id
 		LEFT JOIN game_accounts g ON g.tenant_id = t.id
+		LEFT JOIN tenant_instances i ON i.tenant_id = t.id
 		ORDER BY t.created_at DESC, t.id`)
 	if err != nil {
 		return nil, fmt.Errorf("admin: tenants: %w", err)
@@ -143,7 +163,8 @@ func (s *Service) Tenants(ctx context.Context) ([]Tenant, error) {
 	var out []Tenant
 	for rows.Next() {
 		var t Tenant
-		if err := rows.Scan(&t.ID, &t.Email, &t.CreatedAt, &t.Status, &t.GameName, &t.GameCode); err != nil {
+		if err := rows.Scan(&t.ID, &t.Email, &t.CreatedAt, &t.Status, &t.GameName, &t.GameCode,
+			&t.InstanceState, &t.InstanceVersion, &t.InstanceHealth, &t.InstanceReason, &t.InstanceHealthAt); err != nil {
 			return nil, fmt.Errorf("admin: tenants: %w", err)
 		}
 		out = append(out, t)
@@ -267,6 +288,34 @@ func (s *Service) Suspend(ctx context.Context, actor, tenantID string) error {
 		}
 		return s.audit(ctx, tx, actor, "tenant.suspend", "tenant:"+tenantID, nil)
 	})
+}
+
+// RestartInstance restarts a tenant's bot. The instance moves to pending and
+// the audit row is written in one transaction; only then is Nomad asked, so
+// an action that was recorded is never one that did not start. A Nomad
+// failure leaves the instance failed and returns ErrRestart.
+func (s *Service) RestartInstance(ctx context.Context, actor, tenantID string) error {
+	if !s.prov.Enabled() {
+		return ErrState
+	}
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		switch err := s.prov.PrepareRestart(ctx, tx, tenantID); {
+		case errors.Is(err, provision.ErrNotFound):
+			return s.missingOrState(ctx, tx, tenantID)
+		case errors.Is(err, provision.ErrNotAllowed):
+			return ErrState
+		case err != nil:
+			return fmt.Errorf("admin: restart: %w", err)
+		}
+		return s.audit(ctx, tx, actor, "instance.restart", "tenant:"+tenantID, nil)
+	})
+	if err != nil {
+		return err
+	}
+	if err := s.prov.Restart(ctx, tenantID); err != nil {
+		return ErrRestart
+	}
+	return nil
 }
 
 // Unsuspend returns a suspended tenant to the status it had.

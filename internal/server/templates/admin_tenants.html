@@ -9,12 +9,17 @@
 <td>{{.Created}}</td>
 <td>{{.Status}}</td>
 <td>{{if .Game}}{{.Game}}{{else}}<span class="muted">none</span>{{end}}</td>
-<td class="muted">not provisioned</td>
-<td class="muted">not provisioned</td>
+{{if .Instance}}<td>{{.Instance}}</td>
+<td>{{.Health}}</td>{{else}}<td class="muted">not provisioned</td>
+<td class="muted">none</td>{{end}}
 <td><form method="post" action="/admin/tenants/{{.ID}}/{{if eq .Status "suspended"}}unsuspend{{else}}suspend{{end}}">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <button class="plain" type="submit">{{if eq .Status "suspended"}}Unsuspend{{else}}Suspend{{end}}</button>
-</form></td>
+</form>{{if .CanRestart}}
+<form method="post" action="/admin/tenants/{{.ID}}/restart">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<button class="plain" type="submit">Restart</button>
+</form>{{end}}</td>
 </tr>
 {{end}}
 </table>

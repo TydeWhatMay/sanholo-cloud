@@ -20,6 +20,8 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/db"
 	"github.com/lhaig/sanholo-cloud/internal/game"
 	"github.com/lhaig/sanholo-cloud/internal/mail"
+	"github.com/lhaig/sanholo-cloud/internal/nomad"
+	"github.com/lhaig/sanholo-cloud/internal/provision"
 	"github.com/lhaig/sanholo-cloud/internal/secrets"
 	"github.com/lhaig/sanholo-cloud/internal/server"
 )
@@ -77,6 +79,25 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Provisioning: without NOMAD_ADDR the service is disabled and tenants
+	// stay "not provisioned".
+	nc, err := nomad.New(cfg.Nomad.Client)
+	if err != nil {
+		log.Fatal(err)
+	}
+	prov, err := provision.New(pool, nc, provision.Options{
+		Settings: cfg.Nomad.Job, Version: cfg.Nomad.Version, Timeout: cfg.Nomad.Timeout, Logger: slog.Default(),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer prov.Close()
+	if prov.Enabled() {
+		go prov.Run(ctx, 30*time.Second)
+	} else {
+		log.Print("provisioning: NOMAD_ADDR not set; tenant bots are not started")
+	}
+
 	var wa *webauthn.WebAuthn
 	if cfg.WebAuthn.Enabled() {
 		wa, err = auth.NewWebAuthn(cfg.WebAuthn.RPID, cfg.WebAuthn.RPOrigin, cfg.WebAuthn.RPName)
@@ -104,7 +125,9 @@ func main() {
 	w := &mail.Worker{Pool: pool, Mailer: mailer}
 	go w.Run(ctx, 2*time.Second)
 
-	app := server.New(pool, server.WithApp(&server.App{Auth: svc, Admin: admin.New(pool, svc), Connect: conn, TrustedProxies: cfg.TrustedProxies}))
+	adm := admin.New(pool, svc)
+	adm.SetProvisioner(prov)
+	app := server.New(pool, server.WithApp(&server.App{Auth: svc, Admin: adm, Connect: conn, Provision: prov, TrustedProxies: cfg.TrustedProxies}))
 	go func() {
 		<-ctx.Done()
 		_ = app.Shutdown()

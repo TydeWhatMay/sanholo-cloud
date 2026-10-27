@@ -347,9 +347,17 @@ func TestGameRoutesNeedSessionAndCSRF(t *testing.T) {
 	}
 }
 
+// pinMidWindow fixes the clock at the middle of an hour, so a fixed-window
+// rate limit cannot reset part-way through a test that runs across the hour.
+func pinMidWindow(g *gameEnv) {
+	at := time.Now().Truncate(time.Hour).Add(90 * time.Minute)
+	g.svc.SetClock(func() time.Time { return at })
+}
+
 func TestGameValidateRateLimits(t *testing.T) {
 	t.Run("per account", func(t *testing.T) {
 		g := newGameEnv(t)
+		pinMidWindow(g)
 		c, _ := g.user(t, "ann@example.org")
 		for i := range gameValidateAccountLimit {
 			if r := validate(c, "nope"); r.status != 400 {
@@ -365,6 +373,7 @@ func TestGameValidateRateLimits(t *testing.T) {
 	})
 	t.Run("per address", func(t *testing.T) {
 		g := newGameEnv(t)
+		pinMidWindow(g)
 		var clients []*client
 		for i := range 4 {
 			c, _ := g.user(t, fmt.Sprintf("u%d@example.org", i))

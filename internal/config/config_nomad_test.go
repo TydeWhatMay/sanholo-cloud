@@ -1,0 +1,151 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// 32 bytes of 0x01, base64: a well-formed raw Ed25519 public key.
+const testProxyKey = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+
+func nomadEnv(kv ...string) map[string]string {
+	m := map[string]string{
+		"DATABASE_URL": "postgres://u:p@h/d",
+		"QM_ADDR":      "https://qm.sanholo.space", "QM_TOKEN": "dev-token",
+		"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "nomad-token-1234",
+		"SANHOLO_IMAGE_VERSION": "0.7.1", "TENANT_PROXY_PUBLIC_KEYS": testProxyKey,
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i+1] == "" {
+			delete(m, kv[i])
+		} else {
+			m[kv[i]] = kv[i+1]
+		}
+	}
+	return m
+}
+
+func TestLoadNomadDefaults(t *testing.T) {
+	c, err := Load(env(nomadEnv("APP_BASE_URL", "https://app.sanholo.space")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := c.Nomad
+	if !n.Enabled() || n.Client.Namespace != "sanholo" || n.Version != "0.7.1" || n.Timeout != 15*time.Minute {
+		t.Errorf("nomad = %+v", n)
+	}
+	j := n.Job
+	if j.Namespace != "sanholo" || len(j.Datacenters) != 1 || j.Datacenters[0] != "dc1" || j.MemoryMB != 384 || j.CPUMHz != 300 ||
+		j.TenantDomain != "sanholo.space" || j.QMAddr != "https://qm.sanholo.space" ||
+		j.AlertURL != "https://app.sanholo.space/internal/alerts" || j.ImageRepo != "ghcr.io/tydewhatmay/sanholo" {
+		t.Errorf("job settings = %+v", j)
+	}
+}
+
+func TestLoadNomadOverrides(t *testing.T) {
+	c, err := Load(env(nomadEnv(
+		"NOMAD_NAMESPACE", "staging", "NOMAD_REGION", "global", "NOMAD_DATACENTERS", "dc1, dc2", "NOMAD_HOST_NETWORK", "private",
+		"TENANT_MEMORY_MB", "512", "TENANT_CPU_MHZ", "400", "TENANT_DOMAIN", "staging.sanholo.space",
+		"TENANT_ALERT_URL", "https://app.staging.sanholo.space/internal/alerts", "PROVISION_TIMEOUT", "20m",
+		"SANHOLO_IMAGE_VERSION", "v0.8.0", "SANHOLO_IMAGE_REPO", "registry.example.org/sanholo/bot",
+	)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := c.Nomad
+	if n.Client.Namespace != "staging" || n.Job.Namespace != "staging" || n.Client.Region != "global" || n.Job.Region != "global" ||
+		len(n.Job.Datacenters) != 2 || n.Job.Datacenters[1] != "dc2" || n.Job.HostNetwork != "private" ||
+		n.Job.MemoryMB != 512 || n.Job.CPUMHz != 400 || n.Version != "0.8.0" || n.Timeout != 20*time.Minute ||
+		n.Job.ImageRepo != "registry.example.org/sanholo/bot" {
+		t.Errorf("nomad = %+v", n)
+	}
+}
+
+func TestLoadNomadErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"remote http", nomadEnv("NOMAD_ADDR", "http://nomad.example.org:4646"), "NOMAD_ADDR"},
+		{"no token", nomadEnv("NOMAD_TOKEN", ""), "NOMAD_TOKEN"},
+		{"both tokens", nomadEnv("NOMAD_TOKEN_FILE", "/x"), "NOMAD_TOKEN"},
+		{"no version", nomadEnv("SANHOLO_IMAGE_VERSION", ""), "SANHOLO_IMAGE_VERSION"},
+		{"latest", nomadEnv("SANHOLO_IMAGE_VERSION", "latest"), "SANHOLO_IMAGE_VERSION"},
+		{"no qm", nomadEnv("QM_ADDR", "", "QM_TOKEN", ""), "QM_ADDR"},
+		{"no proxy key", nomadEnv("TENANT_PROXY_PUBLIC_KEYS", ""), "TENANT_PROXY_PUBLIC_KEYS"},
+		{"both key sources", nomadEnv("TENANT_PROXY_PUBLIC_KEYS_FILE", "/x"), "TENANT_PROXY_PUBLIC_KEYS"},
+		{"missing key file", nomadEnv("TENANT_PROXY_PUBLIC_KEYS", "", "TENANT_PROXY_PUBLIC_KEYS_FILE", "/nonexistent/key"), "TENANT_PROXY_PUBLIC_KEYS_FILE"},
+		{"garbage key", nomadEnv("TENANT_PROXY_PUBLIC_KEYS", "not a key"), "proxy public keys"},
+		{"bad memory", nomadEnv("TENANT_MEMORY_MB", "lots"), "TENANT_MEMORY_MB"},
+		{"tiny memory", nomadEnv("TENANT_MEMORY_MB", "8"), "memory"},
+		{"bad timeout", nomadEnv("PROVISION_TIMEOUT", "soon"), "PROVISION_TIMEOUT"},
+		{"short timeout", nomadEnv("PROVISION_TIMEOUT", "5s"), "PROVISION_TIMEOUT"},
+		{"http alert url", nomadEnv("TENANT_ALERT_URL", "http://app.example.org/internal/alerts"), "alert URL"},
+		{"token without address", map[string]string{"DATABASE_URL": "postgres://u:p@h/d", "NOMAD_TOKEN": "t"}, "NOMAD_ADDR"},
+		{"version without address", map[string]string{"DATABASE_URL": "postgres://u:p@h/d", "SANHOLO_IMAGE_VERSION": "0.7.1"}, "NOMAD_ADDR"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(env(tc.env))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.want)
+			}
+			for _, secret := range []string{"nomad-token-1234", "dev-token"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("the error leaks %q", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadNomadDisabledInDevelopment(t *testing.T) {
+	c, err := Load(env(map[string]string{"DATABASE_URL": "postgres://u:p@h/d"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Nomad.Enabled() {
+		t.Error("Nomad enabled with no NOMAD_ADDR")
+	}
+}
+
+func TestLoadNomadRequiredInProduction(t *testing.T) {
+	prod := map[string]string{
+		"DATABASE_URL": "postgres://u:p@h/d", "APP_ENV": "production", "SMTP_HOST": "send.ahasend.com", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "pw",
+		"APP_BASE_URL": "https://app.sanholo.space", "TRUSTED_PROXIES": "10.0.0.0/8", "WEBAUTHN_RP_ID": "sanholo.space",
+		"QM_ADDR": "https://qm.sanholo.space", "QM_ROLE_ID": "role-1", "QM_SECRET_ID_FILE": "/run/secrets/qm-secret-id",
+	}
+	if _, err := Load(env(prod)); err == nil || !strings.Contains(err.Error(), "NOMAD_ADDR is required") {
+		t.Fatalf("production without Nomad: %v", err)
+	}
+	for k, v := range map[string]string{
+		"NOMAD_ADDR": "https://nomad.sanholo.space:4646", "NOMAD_TOKEN": "t", "SANHOLO_IMAGE_VERSION": "0.7.1", "TENANT_PROXY_PUBLIC_KEYS": testProxyKey,
+	} {
+		prod[k] = v
+	}
+	if _, err := Load(env(prod)); err != nil {
+		t.Fatalf("production with Nomad: %v", err)
+	}
+	delete(prod, "NOMAD_TOKEN")
+	if _, err := Load(env(prod)); err == nil {
+		t.Fatal("production without a Nomad token")
+	}
+}
+
+func TestLoadNomadKeysFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.pub")
+	if err := os.WriteFile(path, []byte(testProxyKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(env(nomadEnv("TENANT_PROXY_PUBLIC_KEYS", "", "TENANT_PROXY_PUBLIC_KEYS_FILE", path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(c.Nomad.Job.ProxyPublicKeys, testProxyKey) {
+		t.Error("the key file was not read")
+	}
+}

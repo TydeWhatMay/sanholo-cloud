@@ -16,6 +16,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/admin"
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/connect"
+	"github.com/lhaig/sanholo-cloud/internal/provision"
 )
 
 //go:embed templates/*.html
@@ -41,6 +42,10 @@ type App struct {
 	// Connect serves the game-account section of /account; nil (or a service
 	// without qm) shows that connecting is not available.
 	Connect *connect.Service
+	// Provision starts the tenant's bot after a game account is connected and
+	// reports its state on /account; nil (or a disabled service) leaves
+	// tenants "not provisioned".
+	Provision *provision.Service
 	// TrustedProxies are the edge addresses whose X-Forwarded-For is believed.
 	TrustedProxies []netip.Prefix
 }
@@ -89,6 +94,7 @@ func (a *App) mount(app *fiber.App) {
 	acct.Post("/game/validate", a.gameValidate)
 	acct.Post("/game/confirm", a.gameConfirm)
 	acct.Post("/game/cancel", a.gameCancel)
+	acct.Post("/instance/retry", a.instanceRetry)
 	app.Post("/signout", a.requireSession, a.signout)
 	a.mountAdmin(app)
 }
@@ -341,6 +347,11 @@ func (a *App) account(c *fiber.Ctx) error {
 		}
 		if g != nil {
 			data["Game"] = fiber.Map{"Name": g.ReplicantName, "Code": g.ReplicantCode, "Connected": g.ConnectedAt.UTC().Format("2006-01-02")}
+			inst, err := a.instanceView(c)
+			if err != nil {
+				return a.serverError(c)
+			}
+			data["Instance"] = inst
 		}
 	}
 	return a.render(c, fiber.StatusOK, "account", "Account", data)

@@ -12,7 +12,7 @@ The hosted service around the SanHolo client (`TydeWhatMay/san-holo`). It owns:
   onboarding, the authenticating proxy to each customer's Bridge on
   `<tenant-id>.sanholo.space`, Web Push delivery, export and delete, admin;
 - tenant provisioning: one Nomad job per customer (`sanholo-tenant-<id>`, one
-  task: the customer's bot, image `ghcr.io/tydewhatmay/sanholo:X.Y.Z`), registered
+  task: the customer's bot, image `ghcr.io/tydewhatmay/sanholo:vX.Y.Z`), registered
   through the Nomad HTTP API from the sign-up flow;
 - the updater: rolls each client release to every tenant in stages (canary,
   then batches) and reverts on failed health;

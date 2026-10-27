@@ -11,6 +11,9 @@ import (
 
 	"github.com/lhaig/sanholo-cloud/internal/auth"
 	"github.com/lhaig/sanholo-cloud/internal/dbtest"
+	"github.com/lhaig/sanholo-cloud/internal/nomad"
+	"github.com/lhaig/sanholo-cloud/internal/nomad/nomadfake"
+	"github.com/lhaig/sanholo-cloud/internal/provision"
 )
 
 const base = "https://app.example.org"
@@ -480,5 +483,122 @@ func TestSuspendRefusesTheActorsOwnTenant(t *testing.T) {
 	}
 	if err := f.svc.Suspend(ctx, ActorCLI, opTenant); err != nil {
 		t.Fatalf("cli suspends any tenant: %v", err)
+	}
+}
+
+// provisioned gives the fixture a provisioning service over a fake Nomad and
+// a tenant whose bot is running.
+func (f *fixture) provisioned(t *testing.T, email string) (tenantID string, fake *nomadfake.Fake, prov *provision.Service) {
+	t.Helper()
+	ctx := context.Background()
+	_, tenantID = f.account(t, email)
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO game_accounts (tenant_id, game_account_id, replicant_name, replicant_code) VALUES ($1, $2, 'Alpha', 'AAAA1111')`,
+		tenantID, "replicant:"+tenantID); err != nil {
+		t.Fatal(err)
+	}
+	fake = nomadfake.New(t, "tok-1234", "sanholo")
+	nc, err := nomad.New(nomad.Config{Addr: fake.URL(), Token: "tok-1234", Namespace: "sanholo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov, err = provision.New(f.pool, nc, provision.Options{Settings: nomadfake.Settings(), Version: "0.7.1", Poll: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(prov.Close)
+	f.svc.SetProvisioner(prov)
+	if err := prov.Start(ctx, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	fake.SetPhase("sanholo-tenant-"+tenantID, nomadfake.Healthy)
+	if _, err := prov.Refresh(ctx, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	return tenantID, fake, prov
+}
+
+func TestRestartInstanceWritesAuditAndRestarts(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	tenantID, fake, prov := f.provisioned(t, "user@example.org")
+	opID, _ := f.account(t, "op@example.org")
+
+	if err := f.svc.RestartInstance(ctx, opID, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	prov.Wait()
+	if fake.Restarts("sanholo-tenant-"+tenantID) != 1 {
+		t.Error("the allocation was not restarted")
+	}
+	if n := f.count(t, `SELECT count(*) FROM audit_log WHERE action = 'instance.restart' AND actor = $1 AND target = $2`, opID, "tenant:"+tenantID); n != 1 {
+		t.Errorf("%d audit rows, want 1", n)
+	}
+}
+
+// The audit row and the new state commit together: when the audit write
+// fails nothing changes and Nomad is never asked.
+func TestRestartInstanceIsAtomicWithItsAuditRow(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	tenantID, fake, prov := f.provisioned(t, "user@example.org")
+	f.failAudit(t)
+	if err := f.svc.RestartInstance(ctx, "op", tenantID); err == nil {
+		t.Fatal("restart succeeded although the audit row could not be written")
+	}
+	inst, err := prov.Get(ctx, tenantID)
+	if err != nil || inst.State != provision.StateRunning {
+		t.Errorf("state after a failed audit = %+v, %v; want running", inst, err)
+	}
+	if fake.Restarts("sanholo-tenant-"+tenantID) != 0 {
+		t.Error("Nomad was asked to restart although nothing was recorded")
+	}
+}
+
+func TestRestartInstanceRefusals(t *testing.T) {
+	f := newFixture(t, 20)
+	ctx := context.Background()
+	// Provisioning disabled.
+	_, tenantNone := f.account(t, "none@example.org")
+	if err := f.svc.RestartInstance(ctx, "op", tenantNone); !errors.Is(err, ErrState) {
+		t.Errorf("disabled: %v, want ErrState", err)
+	}
+	tenantID, _, prov := f.provisioned(t, "user@example.org")
+	if err := f.svc.RestartInstance(ctx, "op", tenantNone); !errors.Is(err, ErrState) {
+		t.Errorf("tenant without an instance: %v, want ErrState", err)
+	}
+	if err := f.svc.RestartInstance(ctx, "op", "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown tenant: %v, want ErrNotFound", err)
+	}
+	if err := prov.Stop(ctx, tenantID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.RestartInstance(ctx, "op", tenantID); !errors.Is(err, ErrState) {
+		t.Errorf("stopped instance: %v, want ErrState", err)
+	}
+	if n := f.count(t, `SELECT count(*) FROM audit_log WHERE action = 'instance.restart'`); n != 0 {
+		t.Errorf("%d audit rows for refused restarts", n)
+	}
+}
+
+func TestTenantsListIncludesTheInstance(t *testing.T) {
+	f := newFixture(t, 20)
+	tenantID, _, _ := f.provisioned(t, "user@example.org")
+	_, plain := f.account(t, "plain@example.org")
+	list, err := f.svc.Tenants(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tn := range list {
+		switch tn.ID {
+		case tenantID:
+			if tn.InstanceState != "running" || tn.InstanceHealth != "healthy" || tn.InstanceVersion != "0.7.1" || tn.InstanceHealthAt == nil {
+				t.Errorf("provisioned tenant: %+v", tn)
+			}
+		case plain:
+			if tn.InstanceState != "" {
+				t.Errorf("unprovisioned tenant: %+v", tn)
+			}
+		}
 	}
 }
