@@ -384,3 +384,101 @@ func TestCompareVersions(t *testing.T) {
 		}
 	}
 }
+
+// jobAt is jobOf at a given image version.
+func jobAt(t *testing.T, s nomad.JobSettings, tenantID, version string) map[string]any {
+	t.Helper()
+	var doc struct{ Job map[string]any }
+	if err := json.Unmarshal(render(t, s, tenantID, version), &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc.Job
+}
+
+// servicesOf maps service name to service.
+func servicesOf(job map[string]any) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	for _, raw := range group(job)["Services"].([]any) {
+		svc := raw.(map[string]any)
+		out[svc["Name"].(string)] = svc
+	}
+	return out
+}
+
+// portsOf maps port label to port.
+func portsOf(job map[string]any) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	net := group(job)["Networks"].([]any)[0].(map[string]any)
+	for _, raw := range net["DynamicPorts"].([]any) {
+		p := raw.(map[string]any)
+		out[p["Label"].(string)] = p
+	}
+	return out
+}
+
+// From the client release that has -metrics-addr, the job maps a second
+// port onto the same private host network, passes -metrics-addr for it, and
+// registers it as its own service, so Prometheus scrapes it with no
+// identity while the Bridge port and its service stay as they were.
+func TestJobMetricsPort(t *testing.T) {
+	job := jobAt(t, nomadfake.Settings(), "acme-42", nomad.MetricsSince)
+	ports := portsOf(job)
+	if len(ports) != 2 {
+		t.Fatalf("ports = %v, want http and metrics", ports)
+	}
+	m := ports["metrics"]
+	if m == nil || m["To"].(float64) != nomad.MetricsContainerPort || m["HostNetwork"] != "private" {
+		t.Errorf("metrics port = %v, want To %d on host network private", m, nomad.MetricsContainerPort)
+	}
+	if h := ports["http"]; h == nil || h["To"].(float64) != 8080 || h["HostNetwork"] != "private" {
+		t.Errorf("http port = %v", h)
+	}
+
+	args := toStrings(firstTask(job)["Config"].(map[string]any)["args"])
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-metrics-addr 0.0.0.0:9090") || !strings.Contains(joined, "-addr 0.0.0.0:8080 -hosted-allow-any-bind") {
+		t.Errorf("args = %q, want -metrics-addr 0.0.0.0:9090 beside -addr 0.0.0.0:8080", args)
+	}
+
+	svcs := servicesOf(job)
+	if len(svcs) != 2 {
+		t.Fatalf("services = %v, want sanholo-bot and sanholo-bot-metrics", svcs)
+	}
+	ms := svcs["sanholo-bot-metrics"]
+	if ms == nil || ms["PortLabel"] != "metrics" || ms["Provider"] != "nomad" || ms["AddressMode"] != "host" {
+		t.Fatalf("metrics service = %v", ms)
+	}
+	if tags := toStrings(ms["Tags"]); !reflect.DeepEqual(tags, []string{"tenant=acme-42"}) {
+		t.Errorf("metrics service tags = %v", tags)
+	}
+	// The deployment health stays the Bridge's /healthz alone.
+	if chks, _ := ms["Checks"].([]any); len(chks) != 0 {
+		t.Errorf("metrics service has checks %v; health is /healthz on http only", chks)
+	}
+	bot := svcs["sanholo-bot"]
+	if bot == nil || bot["PortLabel"] != "http" {
+		t.Errorf("sanholo-bot service = %v, want it on the http port", bot)
+	}
+}
+
+// Releases before the flag existed must not get it: an unknown flag stops
+// the client. Their job (and its spec hash) stays exactly as before.
+func TestJobMetricsPortNeedsTheRelease(t *testing.T) {
+	for _, v := range []string{"0.7.1", "0.7.9", "0.8.0-rc.1"} {
+		job := jobAt(t, nomadfake.Settings(), "acme-42", v)
+		if _, ok := portsOf(job)["metrics"]; ok {
+			t.Errorf("%s: has a metrics port", v)
+		}
+		if _, ok := servicesOf(job)["sanholo-bot-metrics"]; ok {
+			t.Errorf("%s: has a metrics service", v)
+		}
+		if args := strings.Join(toStrings(firstTask(job)["Config"].(map[string]any)["args"]), " "); strings.Contains(args, "-metrics-addr") {
+			t.Errorf("%s: passes -metrics-addr", v)
+		}
+	}
+	for _, v := range []string{"0.8.0", "0.8.1", "1.0.0"} {
+		if _, ok := portsOf(jobAt(t, nomadfake.Settings(), "acme-42", v))["metrics"]; !ok {
+			t.Errorf("%s: no metrics port", v)
+		}
+	}
+}

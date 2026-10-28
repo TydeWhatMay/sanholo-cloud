@@ -103,7 +103,9 @@ groups:
           summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} is {{ $value | humanize }}% full."
 
       # Beyond US-023, from the control plane's own metrics.
-      # Delivered only once the control plane is back: it is the push path.
+      # The control plane is the push path, so its push arrives only once it
+      # is back; Alertmanager also emails ControlPlaneDown and
+      # ControlPlaneDatabaseDown (alertmanager.yml, operator-email).
       - alert: ControlPlaneDown
         expr: up{job="sanholo-cloud"} == 0
         for: 5m

@@ -1,6 +1,20 @@
 # Alertmanager for SanHolo Hosted (US-023; deploy/README.md section 9).
-# One receiver: the control plane's operator alert intake, which pushes to
-# the operator's own browsers (Web Push). No third-party service.
+# Two receivers. Every alert goes to the control plane's operator alert
+# intake, which pushes to the operator's own browsers (Web Push). The alerts
+# whose push path is the control plane itself also go by email through
+# AhaSend's SMTP relay, the provider the control plane already sends mail
+# with: when the control plane (or its database, which holds the operator's
+# push subscriptions) is down, the push cannot arrive.
+# Addresses marked EXAMPLE are placeholders. Secrets are files only.
+global:
+  # AhaSend SMTP, as the control plane's SMTP_HOST / SMTP_PORT (587, STARTTLS).
+  smtp_smarthost: send.ahasend.com:587 # EXAMPLE: the AhaSend SMTP host and port
+  smtp_from: SanHolo alerts <alerts@sanholo.space> # EXAMPLE: a sender AhaSend accepts
+  smtp_auth_username: ahasend-smtp-username # EXAMPLE: an AhaSend SMTP credential's username
+  # The credential's password, from qm as a file; never inline.
+  smtp_auth_password_file: /etc/alertmanager/secrets/ahasend-smtp-password
+  smtp_require_tls: true
+
 route:
   receiver: sanholo-operator
   # One notification per alert and subject; the intake pushes each alert
@@ -9,6 +23,14 @@ route:
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
+  routes:
+    # Alerts the push path cannot deliver while they fire: email as well
+    # (continue), then the push route below like every other alert.
+    - receiver: operator-email
+      matchers: [alertname=~"ControlPlaneDown|ControlPlaneDatabaseDown"]
+      continue: true
+    # Everything, including the two above, is pushed.
+    - receiver: sanholo-operator
 
 receivers:
   - name: sanholo-operator
@@ -23,6 +45,11 @@ receivers:
             type: Bearer
             # The contents of ALERTMANAGER_TOKEN_FILE.
             credentials_file: /etc/alertmanager/secrets/sanholo-alerts-token
+
+  - name: operator-email
+    email_configs:
+      - to: operator@example.org # EXAMPLE: the operator's own address
+        send_resolved: true
 
 inhibit_rules:
   # A sealed qm explains every qm symptom.

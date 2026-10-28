@@ -27,17 +27,35 @@ import (
 // Network assumptions (for the infra session, repeated in deploy/README.md):
 //   - group network mode "bridge" (CNI): every tenant task has its own
 //     network namespace, so listening on 0.0.0.0 inside it exposes nothing but
-//     the namespace's own interface. The one port, "http", is mapped by Nomad
-//     onto the host network named in JobSettings.HostNetwork (the private
-//     interface) and nowhere else;
-//   - only the control plane's proxy (and Prometheus) may connect to that
-//     host port, and tenant tasks may connect out only to the game API, qm
-//     and the control plane: both are firewall rules the infra session owns.
+//     the namespace's own interface. The Bridge port, "http", is mapped by
+//     Nomad onto the host network named in JobSettings.HostNetwork (the
+//     private interface) and nowhere else. From client MetricsSince a second
+//     port, "metrics", is mapped onto the same host network: the client's
+//     -metrics-addr listener, GET /metrics only and no identity, for
+//     Prometheus. The proxy only ever dials "http" (Status.Address);
+//   - only the control plane's proxy may connect to the http host port and
+//     only Prometheus to the metrics host port, and tenant tasks may connect
+//     out only to the game API, qm and the control plane: firewall rules the
+//     infra session owns.
 const (
-	// PortLabel is the label of the one network port.
+	// PortLabel is the label of the Bridge port, the only one the proxy dials.
 	PortLabel = "http"
 	// ContainerPort is the port the bot listens on inside its namespace.
 	ContainerPort = 8080
+	// MetricsPortLabel is the label of the private metrics port.
+	MetricsPortLabel = "metrics"
+	// MetricsContainerPort is the client's -metrics-addr port inside its
+	// namespace.
+	MetricsContainerPort = 9090
+	// ServiceName is the Bridge port's service; MetricsServiceName is the
+	// metrics port's, the one Prometheus discovers. Both carry the tag
+	// tenant=<id>.
+	ServiceName        = "sanholo-bot"
+	MetricsServiceName = "sanholo-bot-metrics"
+	// MetricsSince is the first client release with -metrics-addr. An older
+	// client exits on the unknown flag, so its job gets neither the flag,
+	// the port nor the service (and keeps its spec hash).
+	MetricsSince = "0.8.0"
 	// TaskName is the name of the one task.
 	TaskName = "bot"
 	// GroupName is the name of the one group.
@@ -513,10 +531,13 @@ func (s JobSettings) ImageRef(version, digest string) string {
 	return s.Image(version)
 }
 
-// Args are the client's arguments: the image's default command is
-// "serve -hosted", and Nomad's args replace it, so they start with it.
-// ${NOMAD_SECRETS_DIR} and ${NOMAD_TASK_DIR} are interpolated by Nomad.
-func (s JobSettings) Args(tenantID string) []string {
+// HasMetricsPort reports whether a client version serves -metrics-addr.
+func HasMetricsPort(version string) bool { return CompareVersions(version, MetricsSince) >= 0 }
+
+// Args are the client's arguments for one version: the image's default
+// command is "serve -hosted", and Nomad's args replace it, so they start with
+// it. ${NOMAD_SECRETS_DIR} and ${NOMAD_TASK_DIR} are interpolated by Nomad.
+func (s JobSettings) Args(tenantID, version string) []string {
 	args := []string{
 		"serve", "-hosted", "-live",
 		"-addr", fmt.Sprintf("0.0.0.0:%d", ContainerPort), "-hosted-allow-any-bind",
@@ -534,6 +555,9 @@ func (s JobSettings) Args(tenantID string) []string {
 	}
 	if s.VAPIDPublicKey != "" {
 		args = append(args, "-hosted-vapid-public-key", s.VAPIDPublicKey)
+	}
+	if HasMetricsPort(version) {
+		args = append(args, "-metrics-addr", fmt.Sprintf("0.0.0.0:%d", MetricsContainerPort))
 	}
 	return args
 }
@@ -571,13 +595,34 @@ func BuildJobRestart(s JobSettings, tenantID, version, digest string, restart in
 		return Job{}, fmt.Errorf("job settings: %w", err)
 	}
 	id := JobPrefix + tenantID
+	ports := []Port{{Label: PortLabel, To: ContainerPort, HostNetwork: s.HostNetwork}}
+	services := []Service{{
+		// One shared name: the tenant is in the tag, and a service
+		// name is capped at 63 characters where a job id is not.
+		Name: ServiceName, PortLabel: PortLabel, Provider: "nomad", AddressMode: "host",
+		Tags: []string{"tenant=" + tenantID},
+		Checks: []Check{{
+			Name: "healthz", Type: "http", Protocol: "http", Method: "GET", Path: "/healthz", PortLabel: PortLabel,
+			Interval: checkInterval, Timeout: checkTimeout,
+			CheckRestart: CheckRestart{Limit: checkRestartMax, Grace: checkRestartWait},
+		}},
+	}}
+	if HasMetricsPort(v) {
+		// The metrics port sits on the same private host network. Its
+		// service has no check: deployment health stays /healthz.
+		ports = append(ports, Port{Label: MetricsPortLabel, To: MetricsContainerPort, HostNetwork: s.HostNetwork})
+		services = append(services, Service{
+			Name: MetricsServiceName, PortLabel: MetricsPortLabel, Provider: "nomad", AddressMode: "host",
+			Tags: []string{"tenant=" + tenantID}, Checks: []Check{},
+		})
+	}
 	job := Job{
 		ID: id, Name: id, Namespace: s.Namespace, Region: s.Region,
 		Datacenters: s.Datacenters, Type: "service", Priority: 50,
 		Meta: map[string]string{MetaTenant: tenantID, MetaVersion: v},
 		TaskGroups: []TaskGroup{{
 			Name: GroupName, Count: 1,
-			Networks: []Network{{Mode: "bridge", DynamicPorts: []Port{{Label: PortLabel, To: ContainerPort, HostNetwork: s.HostNetwork}}}},
+			Networks: []Network{{Mode: "bridge", DynamicPorts: ports}},
 			Volumes: map[string]VolumeRequest{"data": {
 				Name: "data", Type: "host", Source: VolumeName(tenantID),
 				AccessMode: VolumeAccessMode, AttachmentMode: VolumeAttachmentMode,
@@ -590,22 +635,12 @@ func BuildJobRestart(s JobSettings, tenantID, version, digest string, restart in
 				MaxParallel: 1, HealthCheck: "checks", MinHealthyTime: minHealthyTime,
 				HealthyDeadline: healthyDeadline, ProgressDeadline: progressDeadline, AutoRevert: true,
 			},
-			Services: []Service{{
-				// One shared name: the tenant is in the tag, and a service
-				// name is capped at 63 characters where a job id is not.
-				Name: "sanholo-bot", PortLabel: PortLabel, Provider: "nomad", AddressMode: "host",
-				Tags: []string{"tenant=" + tenantID},
-				Checks: []Check{{
-					Name: "healthz", Type: "http", Protocol: "http", Method: "GET", Path: "/healthz", PortLabel: PortLabel,
-					Interval: checkInterval, Timeout: checkTimeout,
-					CheckRestart: CheckRestart{Limit: checkRestartMax, Grace: checkRestartWait},
-				}},
-			}},
+			Services: services,
 			Tasks: []Task{{
 				Name: TaskName, Driver: "docker",
 				Config: map[string]any{
 					"image":        s.ImageRef(v, digest),
-					"args":         s.Args(tenantID),
+					"args":         s.Args(tenantID, v),
 					"cap_drop":     []string{"ALL"},
 					"security_opt": []string{"no-new-privileges"},
 				},

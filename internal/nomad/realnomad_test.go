@@ -165,6 +165,14 @@ func TestRenderedJobAndVolumeAgainstARealNomad(t *testing.T) {
 	if errs := validate(t, addr, job); len(errs) != 0 {
 		t.Fatalf("Nomad rejects the rendered job:\n%s", strings.Join(errs, "\n"))
 	}
+	// From MetricsSince the job has a second port and service.
+	withMetrics, err := nomad.BuildJob(nomadfake.Settings(), "acme-42", nomad.MetricsSince)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := validate(t, addr, withMetrics); len(errs) != 0 {
+		t.Fatalf("Nomad rejects the rendered job with the metrics port:\n%s", strings.Join(errs, "\n"))
+	}
 
 	// Negative control: the same check does flag the identity names this
 	// repository used to render, so a pass above means something.

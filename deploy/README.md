@@ -85,20 +85,40 @@ registers the tenant's job (`PUT /v1/volume/host/create`, Nomad 1.10+):
 
 - The group uses `network { mode = "bridge" }` (CNI plugins on the tenant
   nodes). Each task has its own network namespace, so the client listens on
-  `0.0.0.0:8080` inside it (`-hosted-allow-any-bind`) and exposes nothing else.
-- Nomad maps the port (label `http`) onto the host network named by
-  `NOMAD_HOST_NETWORK`. Define that host network on the tenant nodes as the
-  private interface (`host_network "private" { cidr = "10.x.x.x/24" }`), so the
-  port is never bound on a public address. Leave it empty to use the node's
-  default address.
+  `0.0.0.0:8080` inside it (`-hosted-allow-any-bind`), the Bridge, and from
+  client 0.8.0 (`nomad.MetricsSince`) also on `0.0.0.0:9090`
+  (`-metrics-addr`), a listener that serves only `GET /metrics`, with no
+  identity, for Prometheus. It exposes nothing else.
+- Nomad maps both ports (labels `http` and `metrics`) onto the host network
+  named by `NOMAD_HOST_NETWORK`. Define that host network on the tenant nodes as
+  the private interface (`host_network "private" { cidr = "10.x.x.x/24" }`), so
+  neither port is ever bound on a public address. Leave it empty to use the
+  node's default address: then the metrics port is as reachable as that address,
+  so set it in production. The metrics port carries no game data (no label holds
+  a device code, location or token), but it has no authentication of its own;
+  the private network and the firewall below are what keep it private.
+- A job for a client older than 0.8.0 gets neither the `metrics` port, its
+  service nor the flag (an unknown flag stops the client), and keeps its spec
+  hash, so tenants are not re-registered for this change; the port arrives with
+  the release that rolls them to 0.8.0 or later.
 - Firewall (US-013), owned by the infra session:
   - inbound to the mapped ports (the dynamic range, 20000-32000 by default) only
-    from the control plane's proxy and Prometheus;
+    from the control plane's proxy (the `http` port) and Prometheus (the
+    `metrics` port). Both are dynamic ports in the same range, so a rule that
+    cannot tell them apart admits both callers to both: the proxy gains
+    nothing (it dials `http` only), and Prometheus reaching `http` meets the
+    identity check and gets `401`;
   - tenant tasks may connect out only to `api.replicant.space:443`, qm, and the
     control plane (`/internal/alerts`, `TENANT_ALERT_URL`).
 - The control plane finds a tenant's bot from the allocation's `http` host
-  address (`nomad.Status.Address`); the service `sanholo-bot` is registered with
-  the Nomad provider (tag `tenant=<id>`) as well.
+  address (`nomad.Status.Address`, which reads the port labelled `http` and
+  no other); the service `sanholo-bot` is registered with the Nomad provider
+  (tag `tenant=<id>`) as well. The metrics port has its own service,
+  `sanholo-bot-metrics` (tag `tenant=<id>`, no check), which only Prometheus
+  reads. Nothing at the edge or in the proxy is built from the Nomad service
+  catalogue, and the edge routes only to the control plane (below), so neither
+  service is ever an edge target. Keep it so: an edge that discovers routes
+  from Nomad services must never pick up `sanholo-bot-metrics`.
 
 ### Edge routing for the Bridge proxy (task 2.4)
 
@@ -325,20 +345,20 @@ carries a tenant id, an email or a token.
    enabled (`--collector.textfile.directory=<dir>`). Disk alerts read it, and
    the backup jobs write `sanholo_backup_*` into that directory (section 10).
 3. **Tenant bots** (job `sanholo-tenants`, Nomad service discovery of
-   `sanholo-bot`, tag `tenant=<id>`). Prometheus needs a Nomad token for the
-   discovery:
+   `sanholo-bot-metrics`, tag `tenant=<id>`, which becomes the `tenant` label).
+   This is each client's private metrics port (section 3): plain HTTP,
+   `GET /metrics` only, no identity and no bearer. Prometheus needs a Nomad
+   token for the discovery:
 
    ```hcl
    namespace "sanholo" { capabilities = ["read-job"] }
    ```
 
-   **Not scrapable yet.** The client serves `/metrics` only to a request with a
-   valid `X-SanHolo-Identity` (an Ed25519 token the control plane's proxy signs
-   per request, `tenant`/`aud` equal to the instance), which Prometheus cannot
-   produce, so every tenant target answers 401. This is a client follow-up (a
-   scrape bearer, or `/metrics` on a second port mapped to the private network
-   only). Until it lands, `TenantThrottled` and the per-tenant API request
-   dashboards have no data; restarts and memory per tenant come from Nomad.
+   The Bridge port's `/metrics` (service `sanholo-bot`) still needs the
+   proxy's per-request `X-SanHolo-Identity` and answers `401` to Prometheus;
+   it is not scraped. A tenant still on a client older than 0.8.0 has no
+   `sanholo-bot-metrics` service, so it is simply not a target until its
+   release moves.
 
 ### Alerts
 
@@ -349,7 +369,7 @@ characters), which becomes the push's kind.
 | Alert | Fires when |
 | --- | --- |
 | `InstanceCrashLooping` | a tenant's bot restarted 3 or more times in 15 minutes (Nomad) |
-| `TenantThrottled` | a tenant got more than 5 game 429s in 10 minutes (needs the tenant scrape) |
+| `TenantThrottled` | a tenant got more than 5 game 429s in 10 minutes (tenant scrape, client 0.8.0 and later) |
 | `QMSealed` / `QMUnreachable` / `QMProbeStale` | qm sealed for 1 minute / not answering (not sealed) for 5 / not checked for 5 |
 | `BackupFailed` / `BackupStale` / `BackupMissing` | a backup run failed / no success for 26 hours / no database backup ever reported (26 hours) |
 | `DiskAlmostFull` | a filesystem above 80% for 15 minutes |
@@ -361,7 +381,8 @@ Prometheus evaluates the rules, Alertmanager groups them and posts its webhook
 to the control plane's `/internal/operator-alerts`, which pushes each alert to
 the operator's own browsers through the same Web Push path as the bots' alerts
 (every subscription of a tenant that has an operator account). No third-party
-notification service is involved.
+notification service is involved in the push; the email fallback below goes
+through AhaSend, which already sends the control plane's mail.
 
 - One push per alert per state change: a firing alert is pushed once and again
   at most every 3 hours while it keeps firing (Alertmanager's
@@ -371,14 +392,46 @@ notification service is involved.
   Operator pushes share one hourly cap of 30 (then a single "more alerts" push).
 - A push that cannot be queued answers 503; Alertmanager retries and only the
   missed alerts are pushed.
-- The control plane is the push path: `ControlPlaneDown` reaches the operator
-  only once the control plane is back. Watch the Alertmanager UI, or add a
-  second receiver of the operator's own, if that gap matters.
+- The control plane is the push path, so an alert about the control plane
+  itself cannot be pushed while it fires. Two alerts therefore also go by email
+  (receiver `operator-email`, route with `continue: true`, so they are pushed as
+  well once the push path is back):
+  - `ControlPlaneDown`: Prometheus cannot scrape the platform listener, the
+    same listener the push intake is on;
+  - `ControlPlaneDatabaseDown`: the intake answers, but the operator's push
+    subscriptions are read from the database (`push.Store.forOperators`).
+  Every other alert is push only. With the control plane down,
+  `ControlPlaneDatabaseDown` cannot fire (its metric is absent) and is
+  inhibited anyway; `ControlPlaneDown` is the email.
+
+### Email from Alertmanager (AhaSend)
+
+Alertmanager sends that email through AhaSend's SMTP relay, the provider the
+control plane already uses (`SMTP_HOST` etc., README). The `global` block of
+`alertmanager.yml` holds placeholders to fill in:
+
+| Setting | Value |
+| --- | --- |
+| `smtp_smarthost` | the AhaSend SMTP host and port, as the control plane's `SMTP_HOST:SMTP_PORT` (`send.ahasend.com:587`, STARTTLS) |
+| `smtp_from` | a sender address on a domain the AhaSend account may send from, as `SMTP_FROM` |
+| `smtp_auth_username` | the username of an AhaSend SMTP credential; a credential of its own for Alertmanager is better than sharing the control plane's, so either can be revoked alone |
+| `smtp_auth_password_file` | `/etc/alertmanager/secrets/ahasend-smtp-password`: that credential's password, stored in qm and delivered as a file, never inline |
+| `receivers[operator-email].email_configs[].to` | the operator's own address |
+
+`smtp_require_tls: true` refuses to send over a connection without STARTTLS.
+Alertmanager reads the password file when it sends, so a rotated password needs
+no reload. Firewall: Alertmanager out to the AhaSend host on 587.
+
+Check the path once after deploying: stop the control plane (or block its
+platform listener from Prometheus) for over 5 minutes and confirm the email
+arrives, then that the "resolved" email follows when it is back.
 
 Checks run on these files: `promtool check config` and `check rules`,
 `promtool test rules sanholo.rules.test.yml` (each US-023 alert at and around
-its threshold), `amtool check-config`, and a real Alertmanager 0.28 posting a
-firing and a resolved alert to the handler.
+its threshold), `amtool check-config`, `amtool config routes test` (the two
+control plane alerts reach `operator-email,sanholo-operator`, every other alert
+`sanholo-operator` only), and a real Alertmanager 0.28 posting a firing and a
+resolved alert to the handler.
 
 ## 10. Backups and restore (US-022)
 
@@ -457,7 +510,8 @@ control plane takes traffic**, and tenant volumes are restored only after it.
    re-anchored on purpose with `qm operator reanchor` ("Anti-rollback
    enforcement"). The qm docs name no backup command yet: the qm session owns
    that. A restored qm holds the game tokens of tenants deleted since its
-   backup; step 4 purges them again.
+   backup; step 4 purges them again. When only qm was restored (the
+   database is intact), run step 4 alone before letting tenants start.
 2. **Keep the control plane stopped** (and the edge pointing elsewhere) until
    step 5.
 3. **Database.** Into an empty database:
@@ -475,7 +529,10 @@ control plane takes traffic**, and tenant volumes are restored only after it.
 4. **Re-apply deletions** (section 8): `sanholo-cloud deletions reapply` with
    the production environment, repeated until it reports no failure. It stops
    and purges the jobs, deletes the volumes and purges qm for every account
-   deleted after the backup.
+   deleted after the backup. For a tenant in the log that the database no
+   longer holds, it purges qm only (a restored qm may still hold its token);
+   until qm ships its purge route this reports a failure for each such
+   tenant.
 5. **Start the control plane**, open `/admin`: no deletion listed as failed,
    instances healthy. Let the edge send traffic again.
 6. **Tenant volumes**, for tenants the restored database still holds, when a

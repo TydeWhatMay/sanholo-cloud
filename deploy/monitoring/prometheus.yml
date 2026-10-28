@@ -24,14 +24,13 @@ scrape_configs:
     static_configs:
       - targets: ["10.0.0.2:9464"] # EXAMPLE: the control plane's private address
 
-  # Every tenant bot, found through Nomad's service catalogue (service
-  # sanholo-bot, tag tenant=<id>, provider nomad, namespace sanholo).
-  #
-  # NOT SCRAPABLE YET: the client serves /metrics only with a valid
-  # X-SanHolo-Identity, an Ed25519 token signed per request by the control
-  # plane's proxy key, which Prometheus cannot produce. Every target answers
-  # 401 until the client follow-up in section 9 lands. The job stays so the
-  # discovery and labels are ready; the TenantThrottled alert needs it.
+  # Every tenant bot's private metrics listener, found through Nomad's
+  # service catalogue (service sanholo-bot-metrics, tag tenant=<id>, provider
+  # nomad, namespace sanholo). The client serves GET /metrics there with no
+  # identity (-metrics-addr, client 0.8.0 and later); the port is mapped onto
+  # the private host network only (deploy/README.md section 3). The Bridge
+  # port's service, sanholo-bot, is never scraped: its /metrics needs the
+  # proxy's per-request identity and answers 401.
   - job_name: sanholo-tenants
     metrics_path: /metrics
     nomad_sd_configs:
@@ -45,7 +44,7 @@ scrape_configs:
           credentials_file: /etc/prometheus/secrets/nomad-sd-token
     relabel_configs:
       - source_labels: [__meta_nomad_service]
-        regex: sanholo-bot
+        regex: sanholo-bot-metrics
         action: keep
       # __meta_nomad_tags is ",tag1,tag2,"; the job carries tenant=<id>.
       - source_labels: [__meta_nomad_tags]

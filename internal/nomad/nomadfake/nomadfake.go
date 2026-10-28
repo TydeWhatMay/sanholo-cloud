@@ -459,6 +459,9 @@ func (f *Fake) allocations(w http.ResponseWriter, id string) {
 		a["DeploymentStatus"] = map[string]any{"Healthy": j.phase == Healthy}
 		a["AllocatedResources"] = map[string]any{"Shared": map[string]any{"Ports": []any{
 			map[string]any{"Label": "http", "Value": 23456, "To": 8080, "HostIP": "10.0.0.7"},
+			// The private metrics port, listed after http: an address read
+			// from any port but "http" would be this one.
+			map[string]any{"Label": "metrics", "Value": 23457, "To": 9090, "HostIP": "10.0.0.7"},
 		}}}
 	case j.phase == Failed:
 		a["ClientStatus"] = "failed"
