@@ -38,7 +38,11 @@ plus the qm session's answers and Lance's decisions relayed on 2026-10-27.
   sudo on the path. Redirects are not followed.
 - 409 `kv_purge_incomplete`: the call's time budget (about 2.5 s; 6-40
   secrets on the file backend, about 15 on raft) ran out; re-run the same
-  call until 204. One secret finishes in one call. 409
+  call until 204. One secret finishes in one call. A call normally takes up
+  to about 5 s, about 10 s when it meets another delete on the same lock
+  stripe. A client timeout is harmless (the purge finishes or stops between
+  paths; the retry job's re-run completes it). If purge timeouts show up in
+  the logs, raise the secrets client timeout (10 s default) to about 15 s. 409
   `kv_purge_in_progress`: an overlapping purge is running, or a write under
   a prefix being purged.
 - Revoke or deny a tenant's writers before purging. SanHolo's tenant row
