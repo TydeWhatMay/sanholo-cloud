@@ -52,8 +52,9 @@ func (s *Service) SetDeletionLog(l *deletionlog.Log) { s.dlog = l }
 
 // Deleted reports what a deletion left to finish.
 type Deleted struct {
-	// SecretPending: the token is still in qm (until qm ships its purge
-	// endpoint every purge is refused). Recorded and retried.
+	// SecretPending: the token is still in qm. Recorded and retried. The
+	// purge contract is final (ADR 0024); until the route is deployed on the
+	// production qm the purge is refused (403) and stays pending.
 	SecretPending bool
 	// VolumePending: the same for the bot's data volume.
 	VolumePending bool
@@ -273,6 +274,9 @@ func (s *Service) deleteRows(ctx context.Context, tenantID string, a accountRef,
 		{`DELETE FROM signin_requests WHERE email_hash = $1`, a.emailHash},
 		{`DELETE FROM rate_counters WHERE key = 'signin:email:' || $1`, a.emailHash},
 		{`DELETE FROM rate_counters WHERE right(key, 36) = $1`, a.id},
+		// The push and alert-intake limits (internal/server/push.go), matched
+		// exactly: a prefix match would hit tenant "ab" when deleting "a".
+		{`DELETE FROM rate_counters WHERE key IN ('push:tenant:' || $1, 'alerts:tenant:' || $1)`, tenantID},
 	} {
 		if _, err := tx.Exec(ctx, q.sql, q.arg); err != nil {
 			return 0, fmt.Errorf("connect: delete: %w", err)

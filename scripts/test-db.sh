@@ -11,7 +11,7 @@ fi
 
 name="sanholo-test-db-$$-$RANDOM"
 password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
-cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -fv "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
 # Publishing 127.0.0.1::5432 lets Docker pick a free host port.

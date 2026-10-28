@@ -23,6 +23,7 @@ import (
 	"github.com/lhaig/sanholo-cloud/internal/mail"
 	"github.com/lhaig/sanholo-cloud/internal/nomad/nomadfake"
 	"github.com/lhaig/sanholo-cloud/internal/provision"
+	"github.com/lhaig/sanholo-cloud/internal/secrets/qmfake"
 )
 
 const annEmail = "ann@example.org"
@@ -1051,5 +1052,84 @@ func TestPrivacyNoticeDescribesExportAndDeletion(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("privacy notice lacks %q", want)
 		}
+	}
+}
+
+// A qm that answers 404 (an unknown mount or route: a wrong prefix, a qm
+// without the route) has not shown the secret gone. The purge stays pending
+// and the check never passes on it.
+func TestAQMAnswering404NeverPassesTheDeletion(t *testing.T) {
+	d, tenant, _ := pendingTombstone(t)
+	d.qm.SetDeleteAllowed(true)
+	d.qm.SetOverride(func(r qmfake.Request) (int, string, bool) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL, "/qm/v1/secret/metadata/") {
+			return http.StatusNotFound, "", true
+		}
+		return 0, "", false
+	})
+	d.passes()
+	if n := rows(t, d.pool, `SELECT count(*) FROM pending_cleanups WHERE tenant_key = $1 AND kind = 'secret'`, tenant); n != 1 {
+		t.Error("a purge whose check read 404 was taken as done")
+	}
+	if state, detail, completed, _ := deletion(t, d.pool, tenant); state != "pending" || completed || !strings.Contains(detail, "qm purge pending") {
+		t.Errorf("check = %s %q completed=%v, want pending", state, detail, completed)
+	}
+	// Without a recorded purge the check asks qm itself: 404 is unreadable.
+	exec(t, d.pool, `DELETE FROM pending_cleanups WHERE tenant_key = $1 AND kind = 'secret'`, tenant)
+	d.passes()
+	if state, detail, completed, _ := deletion(t, d.pool, tenant); state != "pending" || completed || !strings.Contains(detail, "qm could not be read") {
+		t.Errorf("check = %s %q completed=%v, want pending, qm unreadable", state, detail, completed)
+	}
+	if n := rows(t, d.pool, `SELECT count(*) FROM tenants WHERE id = $1`, tenant); n != 1 {
+		t.Error("the tombstone was removed on a 404")
+	}
+}
+
+// The push and alert-intake rate-limit rows are keyed by the tenant id; a
+// deletion removes exactly the deleted tenant's, never a neighbour's whose
+// id merely starts with it.
+func TestDeletionRemovesTheTenantsRateLimitRowsOnly(t *testing.T) {
+	d := newDelEnv(t)
+	c, tenant, _ := d.connected(t)
+	neighbour := tenant + "b"
+	keys := func(id string) []string { return []string{"push:tenant:" + id, "alerts:tenant:" + id} }
+	for _, id := range []string{tenant, neighbour} {
+		for _, k := range keys(id) {
+			exec(t, d.pool, `INSERT INTO rate_counters (key, window_start, count) VALUES ($1, now(), 1)`, k)
+		}
+	}
+	if r := deleteForm(c, annEmail); r.status != 200 {
+		t.Fatalf("delete: %d %s", r.status, r.body)
+	}
+	for _, k := range keys(tenant) {
+		if n := rows(t, d.pool, `SELECT count(*) FROM rate_counters WHERE key = $1`, k); n != 0 {
+			t.Errorf("%s survived the deletion", k)
+		}
+	}
+	for _, k := range keys(neighbour) {
+		if n := rows(t, d.pool, `SELECT count(*) FROM rate_counters WHERE key = $1`, k); n != 1 {
+			t.Errorf("the neighbour's %s was deleted", k)
+		}
+	}
+}
+
+// The check finds a tenant-keyed rate-limit row that appears after the
+// deletion, and ignores a neighbour's.
+func TestTheCheckFindsTenantRateLimitRows(t *testing.T) {
+	for _, k := range []string{"push:tenant:", "alerts:tenant:"} {
+		t.Run(k, func(t *testing.T) {
+			d, tenant, _ := pendingTombstone(t)
+			exec(t, d.pool, `INSERT INTO rate_counters (key, window_start, count) VALUES ($1, now(), 1)`, k+tenant+"b")
+			d.passes()
+			if state, detail, _, _ := deletion(t, d.pool, tenant); strings.Contains(detail, "rate_counters") {
+				t.Fatalf("a neighbour's row failed the check: %s %q", state, detail)
+			}
+			exec(t, d.pool, `INSERT INTO rate_counters (key, window_start, count) VALUES ($1, now(), 1)`, k+tenant)
+			d.passes()
+			state, detail, completed, _ := deletion(t, d.pool, tenant)
+			if state != "failed" || !strings.Contains(detail, "rows remain in rate_counters") || completed {
+				t.Errorf("check = %s %q completed=%v, want failed on rate_counters", state, detail, completed)
+			}
+		})
 	}
 }

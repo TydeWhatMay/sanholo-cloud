@@ -23,7 +23,19 @@ const (
 	Window    = time.Hour
 	// CapNotice is the single push sent when the cap is hit.
 	CapNotice = "More alerts are waiting in your Bridge."
+
+	// OperatorHourlyCap is the operator's own budget of non-critical
+	// platform alerts per Window, apart from every tenant's. Critical
+	// operator alerts are never capped.
+	OperatorHourlyCap = 30
+	// OperatorCapNotice is the single operator push sent when that budget
+	// is spent.
+	OperatorCapNotice = "Further non-critical platform alerts are held back this hour. Alertmanager sends them again; critical alerts still arrive."
 )
+
+// operatorBucket is the cap bucket of operator alerts; no tenant id can
+// take this form.
+const operatorBucket = "\x00operator"
 
 // Bounds on what is accepted and pushed.
 const (
@@ -50,6 +62,10 @@ var ErrBadAlert = errors.New("push: bad alert")
 
 // ErrQueueFull means the delivery queue has no room; the alert is dropped.
 var ErrQueueFull = errors.New("push: delivery queue full")
+
+// ErrCapped means a non-critical operator alert was not queued: the
+// operator's hourly budget is spent. The caller must not treat it as sent.
+var ErrCapped = errors.New("push: operator alert cap reached")
 
 // Alert is the bot's alert as it posts it.
 type Alert struct {
@@ -267,12 +283,33 @@ func (s *Service) Submit(tenantID string, a Alert) error {
 var operatorKind = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 
 // NotifyOperator pushes text to every subscription of a tenant that has an
-// operator account (US-023). Operator pushes have a cap bucket of their own.
-func (s *Service) NotifyOperator(kind, text string) error {
+// operator account (US-023). A critical alert is always queued. Any other
+// severity (an unknown one included) counts against the operator's own
+// budget, OperatorHourlyCap per Window, decided here and not in the worker:
+// over it the alert is not queued and ErrCapped is returned, so the caller
+// does not record it as sent. The first refusal of a window also queues one
+// OperatorCapNotice. The budget is spent even when no operator has
+// subscribed yet.
+func (s *Service) NotifyOperator(kind, severity, text string) error {
 	if !operatorKind.MatchString(kind) || strings.TrimSpace(text) == "" {
 		return ErrBadAlert
 	}
-	return s.enqueue(job{alert: Alert{Kind: kind, Severity: "critical", Text: clean(text, MaxTextRunes)}})
+	if !severities[severity] {
+		severity = "warning"
+	}
+	if severity != "critical" {
+		switch s.admit(operatorBucket, OperatorHourlyCap) {
+		case drop:
+			s.stats.capDropped.Add(1)
+			return ErrCapped
+		case notice:
+			s.stats.capNotices.Add(1)
+			s.stats.capDropped.Add(1)
+			_ = s.enqueue(job{alert: Alert{Kind: "alert-cap", Severity: "warning", Text: OperatorCapNotice, Key: "alert-cap"}})
+			return ErrCapped
+		}
+	}
+	return s.enqueue(job{alert: Alert{Kind: kind, Severity: severity, Text: clean(text, MaxTextRunes)}})
 }
 
 func (s *Service) enqueue(j job) error {
@@ -295,8 +332,8 @@ const (
 	drop
 )
 
-// admit counts one alert against bucket's window.
-func (s *Service) admit(bucket string) verdict {
+// admit counts one alert against bucket's window of limit alerts.
+func (s *Service) admit(bucket string, limit int) verdict {
 	now := s.cfg.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,7 +350,7 @@ func (s *Service) admit(bucket string) verdict {
 		s.windows[bucket] = w
 	}
 	switch {
-	case w.n < HourlyCap:
+	case w.n < limit:
 		w.n++
 		return send
 	case !w.noticed:
@@ -326,9 +363,8 @@ func (s *Service) admit(bucket string) verdict {
 func (s *Service) process(ctx context.Context, j job) {
 	var subs []stored
 	var err error
-	bucket := j.tenantID
-	if j.tenantID == "" {
-		bucket = "\x00operator"
+	operator := j.tenantID == ""
+	if operator {
 		subs, err = s.cfg.Store.forOperators(ctx)
 	} else {
 		subs, err = s.cfg.Store.forTenant(ctx, j.tenantID)
@@ -341,20 +377,23 @@ func (s *Service) process(ctx context.Context, j job) {
 		return // nothing to deliver to; the cap is not spent
 	}
 	a := j.alert
-	switch s.admit(bucket) {
-	case drop:
-		s.stats.capDropped.Add(1)
-		return
-	case notice:
-		s.stats.capNotices.Add(1)
-		a = Alert{Kind: "alert-cap", Severity: "warning", Text: CapNotice, Key: "alert-cap"}
+	// Operator alerts were admitted by NotifyOperator.
+	if !operator {
+		switch s.admit(j.tenantID, HourlyCap) {
+		case drop:
+			s.stats.capDropped.Add(1)
+			return
+		case notice:
+			s.stats.capNotices.Add(1)
+			a = Alert{Kind: "alert-cap", Severity: "warning", Text: CapNotice, Key: "alert-cap"}
+		}
 	}
 	for _, sub := range subs {
 		p := BuildPayload(a, s.cfg.TenantOrigin(sub.TenantID))
 		if a.Kind == "alert-cap" {
 			p.Title = "SanHolo"
 		}
-		if j.tenantID == "" {
+		if operator {
 			p.Title = "SanHolo operator: " + strings.ReplaceAll(a.Kind, "-", " ")
 		}
 		body, _ := json.Marshal(p) // strings only

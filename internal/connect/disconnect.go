@@ -47,8 +47,9 @@ func (s *Service) SetProvisioner(p *provision.Service) { s.prov = p }
 // Disconnected reports what a disconnect left to finish.
 type Disconnected struct {
 	// SecretPending: the token could not be deleted from the secrets store
-	// yet (until qm ships its purge endpoint every deletion is refused). The
-	// deletion is recorded and retried by RunCleanups.
+	// yet (until the purge route of the final contract, ADR 0024, is deployed
+	// on the production qm every purge is refused with 403). The deletion is
+	// recorded and retried by RunCleanups.
 	SecretPending bool
 	// VolumePending: the same for the bot's data volume.
 	VolumePending bool

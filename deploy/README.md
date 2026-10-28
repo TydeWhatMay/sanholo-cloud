@@ -261,7 +261,8 @@ Procedure, with the control plane stopped and the restored database in place:
    database does not have is reported as "nothing to delete". Run it again until
    it reports no failure; it is safe to repeat.
 3. Start the control plane. Its cleanup worker retries what could not finish
-   (qm until Part E ships, a busy volume) and its check job reports the result
+   (the qm purge, refused with 403 and pending until the route of the final
+   contract, ADR 0024, is deployed on the production qm; a busy volume) and its check job reports the result
    in `/admin`, under "Account deletions".
 4. Open `/admin` and confirm that no deletion is listed as failed.
 
@@ -273,7 +274,7 @@ re-deletes, through `DeleteVolume`.
 ## 9. Monitoring and operator alerts (US-007, US-023)
 
 Files: `deploy/monitoring/prometheus.yml`, `sanholo.rules.yml` (with
-`sanholo.rules.test.yml`), `alertmanager.yml`. Addresses marked `EXAMPLE` are
+`sanholo.rules.test.yml`), `alertmanager.yml`, `grafana-dashboard.json`. Addresses marked `EXAMPLE` are
 placeholders. Every secret is a file (`credentials_file`), never inline.
 
 ### The platform listener
@@ -313,7 +314,9 @@ carries a tenant id, an email or a token.
   `..._pending_cleanup_max_attempts{kind}`
 - `sanholo_cloud_mail_outbox{state="queued|failed"}`,
   `sanholo_cloud_mail_outbox_oldest_queued_seconds`
-- `sanholo_cloud_tenant_deletions{check_state}`
+- `sanholo_cloud_tenant_deletions{check_state}`,
+  `sanholo_cloud_tenant_deletions_stalled` (deletions that stopped before the
+  tenant's rows were deleted, requested over an hour ago)
 - `sanholo_cloud_push_messages_total{result}`,
   `sanholo_cloud_push_alerts_dropped_total{reason="cap|queue_full"}`,
   `sanholo_cloud_push_cap_hits_total`, `sanholo_cloud_operator_alerts_total{result}`
@@ -368,10 +371,12 @@ characters), which becomes the push's kind.
 
 | Alert | Fires when |
 | --- | --- |
-| `InstanceCrashLooping` | a tenant's bot restarted 3 or more times in 15 minutes (Nomad) |
+| `InstanceCrashLooping` | a tenant's bot restarted 3 or more times in the last hour, added up over all its allocations (Nomad); keeps firing 30 minutes past the last match, so a reschedule delayed by an hour does not resolve it |
 | `TenantThrottled` | a tenant got more than 5 game 429s in 10 minutes (tenant scrape, client 0.8.0 and later) |
 | `QMSealed` / `QMUnreachable` / `QMProbeStale` | qm sealed for 1 minute / not answering (not sealed) for 5 / not checked for 5 |
 | `BackupFailed` / `BackupStale` / `BackupMissing` | a backup run failed / no success for 26 hours / no database backup ever reported (26 hours) |
+| `BackupRetentionFailed` | the retention after the database backup failed (section 10) |
+| `DeletionStalled` | an account deletion stopped before the tenant's rows were deleted (bot not stopped, deletion log not written) over an hour ago |
 | `DiskAlmostFull` | a filesystem above 80% for 15 minutes |
 | `InstanceFailed`, `ReleaseHalted`, `DeletionCheckFailed`, `CleanupStuck`, `MailStuck`, `ControlPlaneDatabaseDown`, `ControlPlaneDown` | control plane state, see the rule annotations |
 
@@ -389,7 +394,12 @@ through AhaSend, which already sends the control plane's mail.
   `repeat_interval` is 4 hours); a resolved alert is pushed once as
   "Resolved: ...", and only if its firing push went out.
 - At most 50 alerts are read from one notification (Alertmanager sends 20).
-  Operator pushes share one hourly cap of 30 (then a single "more alerts" push).
+  Operator pushes have a budget of their own, apart from every tenant's: 30
+  non-critical alerts an hour (the rule's `severity` label), then a single
+  operator notice. Alerts with `severity: critical` are never capped. An alert
+  refused over the budget is not recorded as pushed (counted as
+  `sanholo_cloud_operator_alerts_total{result="capped"}`) and is pushed when
+  Alertmanager sends it again in a later hour.
 - A push that cannot be queued answers 503; Alertmanager retries and only the
   missed alerts are pushed.
 - The control plane is the push path, so an alert about the control plane
@@ -426,6 +436,73 @@ Check the path once after deploying: stop the control plane (or block its
 platform listener from Prometheus) for over 5 minutes and confirm the email
 arrives, then that the "resolved" email follows when it is back.
 
+### Dashboard
+
+`grafana-dashboard.json` is a Grafana dashboard (import it; the Prometheus
+data source is the `datasource` variable, the `tenant` variable filters the
+tenant panels). Its queries, which also work in Prometheus' own expression
+browser (replace `$tenant` with `.*`):
+
+**Tenants**
+
+- API requests per minute:
+  `sum by (tenant) (rate(sanholo_api_requests_total{job="sanholo-tenants",tenant=~"$tenant"}[5m])) * 60`
+- Game throttles (429) per 10 minutes:
+  `sum by (tenant) (increase(sanholo_api_throttled_total{job="sanholo-tenants",tenant=~"$tenant"}[10m]))`
+- Bot restarts in the last hour (all allocations):
+  `sum by (tenant) (max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+",tenant=~"$tenant"}[1h]) - (last_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+",tenant=~"$tenant"}[1h] offset 1h) or max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+",tenant=~"$tenant"}[1h]) * 0))`
+- Bot memory (from the Go runtime):
+  `sum by (tenant) (go_memstats_sys_bytes{job="sanholo-tenants",tenant=~"$tenant"})`
+  `sum by (tenant) (go_memstats_heap_inuse_bytes{job="sanholo-tenants",tenant=~"$tenant"})`
+- Bot action errors per hour:
+  `sum by (tenant) (increase(sanholo_errors_total{job="sanholo-tenants",tenant=~"$tenant"}[1h]))`
+- Bot ticks per minute:
+  `sum by (tenant) (rate(sanholo_bot_ticks_total{job="sanholo-tenants",tenant=~"$tenant"}[5m])) * 60`
+
+**Control plane**
+
+- Tenants by status:
+  `sanholo_cloud_tenants{job="sanholo-cloud"}`
+- Instances by state:
+  `sanholo_cloud_instances{job="sanholo-cloud"}`
+- Instances by health:
+  `sanholo_cloud_instances_health{job="sanholo-cloud"}`
+- qm and database:
+  `sanholo_cloud_qm_up{job="sanholo-cloud"}`
+  `sanholo_cloud_qm_sealed{job="sanholo-cloud"}`
+  `sanholo_cloud_database_up{job="sanholo-cloud"}`
+- Web Push messages per minute:
+  `sum by (result) (rate(sanholo_cloud_push_messages_total{job="sanholo-cloud"}[5m])) * 60`
+- Alerts not pushed, last hour:
+  `sum by (reason) (increase(sanholo_cloud_push_alerts_dropped_total{job="sanholo-cloud"}[1h]))`
+  `increase(sanholo_cloud_push_cap_hits_total{job="sanholo-cloud"}[1h])`
+- Operator alerts, last hour:
+  `sum by (result) (increase(sanholo_cloud_operator_alerts_total{job="sanholo-cloud"}[1h]))`
+- Releases and rollout:
+  `sanholo_cloud_releases{job="sanholo-cloud"}`
+  `sanholo_cloud_rollout_tenants{job="sanholo-cloud"}`
+- Account deletions:
+  `sanholo_cloud_tenant_deletions{job="sanholo-cloud"}`
+  `sanholo_cloud_tenant_deletions_stalled{job="sanholo-cloud"}`
+- Pending cleanups:
+  `sanholo_cloud_pending_cleanups{job="sanholo-cloud"}`
+  `sanholo_cloud_pending_cleanup_max_attempts{job="sanholo-cloud"}`
+- Oldest waiting work:
+  `sanholo_cloud_pending_cleanup_oldest_seconds{job="sanholo-cloud"}`
+  `sanholo_cloud_mail_outbox_oldest_queued_seconds{job="sanholo-cloud"}`
+- Mail outbox:
+  `sanholo_cloud_mail_outbox{job="sanholo-cloud"}`
+- Control plane memory:
+  `go_memstats_sys_bytes{job="sanholo-cloud"}`
+  `go_memstats_heap_inuse_bytes{job="sanholo-cloud"}`
+- Control plane goroutines:
+  `go_goroutines{job="sanholo-cloud"}`
+
+The tenant panels need the tenant scrape (clients 0.8.0 and later) and, for
+restarts, the Nomad scrape. Memory is the bot's Go runtime
+(`go_memstats_*`), which the client exports; Nomad's per-allocation memory
+metrics depend on the Nomad version and are not used.
+
 Checks run on these files: `promtool check config` and `check rules`,
 `promtool test rules sanholo.rules.test.yml` (each US-023 alert at and around
 its threshold), `amtool check-config`, `amtool config routes test` (the two
@@ -442,7 +519,9 @@ restic repository in Hetzner Object Storage in **a different location** from
 the servers (servers in Falkenstein or Nuremberg: a bucket in Helsinki, say).
 Retention is 30 days (`restic forget --keep-within 30d --prune`, measured from
 the newest snapshot, over the whole repository, so a node that left keeps no
-tenant data past 30 days either).
+tenant data past 30 days either). It runs after every database backup run,
+also when the dump failed, so a dump that keeps failing does not keep data
+past the window.
 
 | Target (restic tag) | Job | When (UTC) | What |
 | --- | --- | --- | --- |
@@ -495,7 +574,11 @@ Each run writes `sanholo_backup_last_attempt_ok{target}` and
 and `..._last_success_timestamp_seconds{target}` on success only.
 `BackupFailed` fires on a failed run, `BackupStale` when a target's last
 success is older than 26 hours (the job did not run), `BackupMissing` when no
-database backup has ever reported.
+database backup has ever reported. The retention is reported on its own:
+`sanholo_backup_last_retention_ok{target="postgres"}` and the
+`BackupRetentionFailed` alert. A run whose backup succeeded but whose
+retention failed still counts as a successful backup and exits 3, so the job
+shows the failure too.
 
 ### Restore
 
@@ -530,9 +613,10 @@ control plane takes traffic**, and tenant volumes are restored only after it.
    the production environment, repeated until it reports no failure. It stops
    and purges the jobs, deletes the volumes and purges qm for every account
    deleted after the backup. For a tenant in the log that the database no
-   longer holds, it purges qm only (a restored qm may still hold its token);
-   until qm ships its purge route this reports a failure for each such
-   tenant.
+   longer holds, it purges qm only (a restored qm may still hold its token).
+   The purge contract is final (ADR 0024), but until the route is deployed
+   on the production qm the purge is refused (403) and stays pending: this
+   then reports a failure for each such tenant.
 5. **Start the control plane**, open `/admin`: no deletion listed as failed,
    instances healthy. Let the edge send traffic again.
 6. **Tenant volumes**, for tenants the restored database still holds, when a

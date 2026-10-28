@@ -36,7 +36,7 @@ type Querier interface {
 
 // AlertStats are the operator alert intake's counters.
 type AlertStats struct {
-	Pushed, Deduped, Failed, Truncated uint64
+	Pushed, Deduped, Failed, Truncated, Capped uint64
 }
 
 // Source is everything one scrape reads. Any nil field leaves its metrics
@@ -113,11 +113,12 @@ func (s *Source) Write(ctx context.Context, w io.Writer) error {
 	}
 	if s.Alerts != nil {
 		st := s.Alerts()
-		e.family("sanholo_cloud_operator_alerts_total", "counter", "Alertmanager notifications by outcome: pushed, deduped, failed (queue full), truncated (over the per-request limit).")
+		e.family("sanholo_cloud_operator_alerts_total", "counter", "Alertmanager notifications by outcome: pushed, deduped, failed (queue full), truncated (over the per-request limit), capped (over the operator's hourly budget; pushed on a later send).")
 		e.sample("sanholo_cloud_operator_alerts_total", float64(st.Pushed), "result", "pushed")
 		e.sample("sanholo_cloud_operator_alerts_total", float64(st.Deduped), "result", "deduped")
 		e.sample("sanholo_cloud_operator_alerts_total", float64(st.Failed), "result", "failed")
 		e.sample("sanholo_cloud_operator_alerts_total", float64(st.Truncated), "result", "truncated")
+		e.sample("sanholo_cloud_operator_alerts_total", float64(st.Capped), "result", "capped")
 	}
 
 	var mem runtime.MemStats
@@ -171,6 +172,19 @@ func (s *Source) writeDB(ctx context.Context, e *enc) error {
 			return err
 		}
 	}
+
+	// A deletion that stopped before the tenant's rows were deleted (the bot
+	// could not be stopped, the deletion log could not be written): the
+	// tenant is 'deleting', the deletion never reached a check. The resume
+	// pass retries it after a few minutes, so an hour means it is stuck.
+	var stalled int64
+	if err := s.DB.QueryRow(ctx, `SELECT count(*) FROM tenant_deletions d JOIN tenants t ON t.id = d.tenant_key
+		WHERE d.completed_at IS NULL AND d.check_state = 'unchecked' AND t.status = 'deleting'
+		  AND d.requested_at < now() - interval '1 hour'`).Scan(&stalled); err != nil {
+		return err
+	}
+	e.family("sanholo_cloud_tenant_deletions_stalled", "gauge", "Account deletions that stopped before the tenant's rows were deleted, requested over an hour ago.")
+	e.sample("sanholo_cloud_tenant_deletions_stalled", float64(stalled))
 
 	type cleanup struct {
 		n        int64

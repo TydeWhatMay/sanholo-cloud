@@ -357,27 +357,62 @@ func TestPurgeAcceptsOKAndNoContent(t *testing.T) {
 // qm answers a metadata read of a missing path with 204 and an empty body;
 // 404 (unknown mount or route) is read as missing too.
 func TestMissingPathReadsAsAbsent(t *testing.T) {
-	for _, status := range []int{http.StatusNoContent, http.StatusNotFound} {
-		c, f, _ := setup(t)
-		ctx := context.Background()
-		if err := c.Put(ctx, "t1", creds); err != nil {
-			t.Fatal(err)
+	c, f, _ := setup(t)
+	ctx := context.Background()
+	if err := c.Put(ctx, "t1", creds); err != nil {
+		t.Fatal(err)
+	}
+	f.SetOverride(func(r qmfake.Request) (int, string, bool) {
+		switch r.Method {
+		case http.MethodDelete, http.MethodGet:
+			return http.StatusNoContent, "", true
 		}
-		f.SetOverride(func(r qmfake.Request) (int, string, bool) {
-			switch r.Method {
-			case http.MethodDelete:
-				return http.StatusNoContent, "", true
-			case http.MethodGet:
-				return status, "", true
+		return 0, "", false
+	})
+	if v, err := c.Version(ctx, "t1"); err != nil || v != 0 {
+		t.Errorf("version = %d, %v; want 0, nil", v, err)
+	}
+	if err := c.PurgeTenant(ctx, "t1"); err != nil {
+		t.Errorf("purge: %v", err)
+	}
+}
+
+// A 404 is an unknown mount or route (a wrong prefix, a qm without the
+// route), not an absent secret: a purge and its check must not pass on it.
+func TestNotFoundIsAProtocolError(t *testing.T) {
+	cases := []struct {
+		name         string
+		deleteStatus int
+		getStatus    int
+	}{
+		{"metadata read 404", http.StatusNoContent, http.StatusNotFound},
+		{"purge route 404", http.StatusNotFound, http.StatusNoContent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, f, _ := setup(t)
+			ctx := context.Background()
+			if err := c.Put(ctx, "t1", creds); err != nil {
+				t.Fatal(err)
 			}
-			return 0, "", false
+			f.SetOverride(func(r qmfake.Request) (int, string, bool) {
+				switch r.Method {
+				case http.MethodDelete:
+					return tc.deleteStatus, "", true
+				case http.MethodGet:
+					return tc.getStatus, "", true
+				}
+				return 0, "", false
+			})
+			if err := c.PurgeTenant(ctx, "t1"); !errors.Is(err, secrets.ErrProtocol) {
+				t.Errorf("purge = %v, want ErrProtocol", err)
+			}
+			if tc.getStatus == http.StatusNotFound {
+				if v, err := c.Version(ctx, "t1"); !errors.Is(err, secrets.ErrProtocol) || v != 0 {
+					t.Errorf("version = %d, %v; want ErrProtocol", v, err)
+				}
+			}
 		})
-		if v, err := c.Version(ctx, "t1"); err != nil || v != 0 {
-			t.Errorf("status %d: version = %d, %v; want 0, nil", status, v, err)
-		}
-		if err := c.PurgeTenant(ctx, "t1"); err != nil {
-			t.Errorf("status %d: purge: %v", status, err)
-		}
 	}
 }
 

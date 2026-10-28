@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lhaig/sanholo-cloud/internal/dbtest"
+	"github.com/lhaig/sanholo-cloud/internal/opalert"
 	"github.com/lhaig/sanholo-cloud/internal/push"
 )
 
@@ -476,7 +477,7 @@ func TestNotifyOperatorReachesOnlyOperatorTenants(t *testing.T) {
 	cust := seed(t, e.pool, "acme", false)
 	op.add(t, e.st, newKeys(t).sub(endpoint(1)))
 	cust.add(t, e.st, newKeys(t).sub(endpoint(2)))
-	if err := e.svc.NotifyOperator("qm-sealed", "qm is sealed"); err != nil {
+	if err := e.svc.NotifyOperator("qm-sealed", "critical", "qm is sealed"); err != nil {
 		t.Fatal(err)
 	}
 	e.svc.Wait()
@@ -488,11 +489,11 @@ func TestNotifyOperatorReachesOnlyOperatorTenants(t *testing.T) {
 		t.Fatal("a customer received an operator alert")
 	}
 	for _, kind := range []string{"", "Bad Kind", "x/y", strings.Repeat("a", 41)} {
-		if err := e.svc.NotifyOperator(kind, "t"); err == nil {
+		if err := e.svc.NotifyOperator(kind, "critical", "t"); err == nil {
 			t.Errorf("kind %q accepted", kind)
 		}
 	}
-	if err := e.svc.NotifyOperator("ok", "  "); err == nil {
+	if err := e.svc.NotifyOperator("ok", "critical", "  "); err == nil {
 		t.Error("blank text accepted")
 	}
 }
@@ -549,5 +550,75 @@ func TestParseAlert(t *testing.T) {
 		if _, err := push.ParseAlert([]byte(body)); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// Operator alerts, through the Alertmanager intake, have a budget of their
+// own: 31 non-critical alerts spend it (30 pushes and one operator notice),
+// a critical one still pushes, a tenant is not affected, and the capped
+// alert is pushed when Alertmanager sends it again in the next window.
+func TestOperatorBudgetIsOwnAndCriticalIsNeverCapped(t *testing.T) {
+	e := newEnv(t)
+	op := seed(t, e.pool, "ops", true)
+	cust := seed(t, e.pool, "acme", false)
+	opEP, custEP := endpoint(1), endpoint(2)
+	op.add(t, e.st, newKeys(t).sub(opEP))
+	cust.add(t, e.st, newKeys(t).sub(custEP))
+	in := opalert.New(e.svc, nil)
+	throttled := func(i int) opalert.Alert {
+		return opalert.Alert{
+			Status: "firing", Fingerprint: fmt.Sprintf("thr%02d", i),
+			Labels:      map[string]string{"alertname": "TenantThrottled", "kind": "tenant-throttled", "severity": "warning"},
+			Annotations: map[string]string{"summary": fmt.Sprintf("Tenant t%02d was throttled.", i)},
+		}
+	}
+	handle := func(a opalert.Alert) {
+		t.Helper()
+		if err := in.Handle(opalert.Notification{Version: "4", Alerts: []opalert.Alert{a}}); err != nil {
+			t.Fatalf("handle %s: %v", a.Fingerprint, err)
+		}
+		e.svc.Wait()
+	}
+	for i := range push.OperatorHourlyCap + 1 {
+		handle(throttled(i))
+	}
+	got := e.sender.to(opEP)
+	if len(got) != push.OperatorHourlyCap+1 {
+		t.Fatalf("operator pushes = %d, want %d (the cap and one notice)", len(got), push.OperatorHourlyCap+1)
+	}
+	last := got[len(got)-1].p
+	if last.Kind != "alert-cap" || last.Body != push.OperatorCapNotice || strings.Contains(last.Body, "Bridge") ||
+		last.Title != "SanHolo operator: alert cap" {
+		t.Fatalf("operator cap notice = %+v", last)
+	}
+	if st := in.Stats(); st.Pushed != uint64(push.OperatorHourlyCap) || st.Capped != 1 {
+		t.Fatalf("intake stats = %+v: the capped alert must not count as pushed", st)
+	}
+	// Critical: never capped.
+	handle(opalert.Alert{
+		Status: "firing", Fingerprint: "qm",
+		Labels:      map[string]string{"alertname": "QMSealed", "kind": "qm-sealed", "severity": "critical"},
+		Annotations: map[string]string{"summary": "qm is sealed"},
+	})
+	if got := e.sender.to(opEP); len(got) != push.OperatorHourlyCap+2 || got[len(got)-1].p.Kind != "qm-sealed" {
+		t.Fatalf("the critical alert was capped: %d pushes", len(got))
+	}
+	// A tenant's budget is its own.
+	_ = e.svc.Submit("acme", alert("test", "hi"))
+	e.svc.Wait()
+	if len(e.sender.to(custEP)) != 1 {
+		t.Fatal("the operator's flood capped a tenant")
+	}
+	// Still capped: Alertmanager's resend of the capped alert waits.
+	handle(throttled(push.OperatorHourlyCap))
+	if n := len(e.sender.to(opEP)); n != push.OperatorHourlyCap+2 {
+		t.Fatalf("pushes while capped = %d", n)
+	}
+	// The next window: the same alert, sent again, is pushed.
+	e.advance(push.Window)
+	handle(throttled(push.OperatorHourlyCap))
+	got = e.sender.to(opEP)
+	if len(got) != push.OperatorHourlyCap+3 || got[len(got)-1].p.Body != fmt.Sprintf("Tenant t%02d was throttled.", push.OperatorHourlyCap) {
+		t.Fatalf("the capped alert was not pushed on the next send: %+v", got[len(got)-1].p)
 	}
 }

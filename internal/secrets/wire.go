@@ -35,8 +35,9 @@ import (
 // barrier-backed request. A rotation is a plain new write: qm keeps 16
 // versions and prunes the oldest.
 //
-// PROVISIONAL (qm Part E, not shipped; shapes may change). Both need delete
-// plus sudo on the matching path, which the interim grants do not include:
+// qm Part E, final contract (ADR 0024), not yet deployed on the production
+// qm (until it is, qm answers 403). Both need delete plus sudo on the
+// matching path:
 //
 //	delete one path:  DELETE <addr>/qm/v1/secret/metadata/<path>
 //	                  (every version and the metadata; the fake implements it,
@@ -61,7 +62,7 @@ const (
 	renewPath      = "/qm/v1/auth/token/renew-self"
 	dataPrefix     = "/qm/v1/secret/data/"
 	metaPrefix     = "/qm/v1/secret/metadata/"
-	purgePrefix    = "/qm/v1/secret/purge/" // provisional (Part E)
+	purgePrefix    = "/qm/v1/secret/purge/" // Part E (ADR 0024)
 	authHeaderName = "X-QM-Token"
 
 	tenantsRoot = "sanholo/tenants/"
@@ -88,8 +89,6 @@ type call struct {
 	method string
 	path   string
 	body   []byte
-	// okNotFound makes a 404 a normal answer (not present, nothing to purge).
-	okNotFound bool
 	// noAuth omits the token header (health, login).
 	noAuth bool
 }
@@ -121,11 +120,11 @@ func putCall(path string, c Credentials) (call, error) {
 }
 
 func metaCall(path string) call {
-	return call{method: http.MethodGet, path: metaPrefix + path, okNotFound: true}
+	return call{method: http.MethodGet, path: metaPrefix + path}
 }
 
 func purgeCall(prefix string) call {
-	return call{method: http.MethodDelete, path: purgePrefix + prefix, okNotFound: true}
+	return call{method: http.MethodDelete, path: purgePrefix + prefix}
 }
 
 // decodeHealth returns qm's initialized and sealed flags.

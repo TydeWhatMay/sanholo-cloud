@@ -18,20 +18,81 @@ tests:
             exp_annotations:
               summary: "Tenant bolt was throttled by the game 6 times in 10 minutes."
 
-  # Crash loop: 3 restarts in 15 minutes fires, 2 does not.
+  # Crash loop. Every restart series starts at 1 (go-metrics creates it at
+  # the first increment). acme: allocation a1 restarts 3 times (4-6m) and
+  # fails; Nomad reschedules a2 about an hour later (the longest delay),
+  # which restarts 3 times (69-71m) and fails; then a3 (139-141m). Each
+  # allocation alone tops out at 3 and its old series stays exported, flat.
+  # The alert fires on a1's loop and keeps firing across both reschedules.
+  # bolt restarted once: quiet. cora restarted twice in one allocation and
+  # once in the next within the hour: fires only because allocations add up.
   - interval: 1m
     input_series:
       - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-acme",tenant="acme",alloc_id="a1"}'
-        values: "0 0 1 1 2 2 3 3 3 3 3 3 3 3 3 3"
+        values: "_x4 1 2 3 3x200"
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-acme",tenant="acme",alloc_id="a2"}'
+        values: "_x69 1 2 3 3x150"
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-acme",tenant="acme",alloc_id="a3"}'
+        values: "_x139 1 2 3 3x100"
       - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-bolt",tenant="bolt",alloc_id="b1"}'
-        values: "0 0 1 1 2 2 2 2 2 2 2 2 2 2 2 2"
+        values: "_x4 1x200"
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-cora",tenant="cora",alloc_id="c1"}'
+        values: "_x4 1 1 1 1 1 1 1 1 1 1 2x200"
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-cora",tenant="cora",alloc_id="c2"}'
+        values: "_x40 1x200"
     alert_rule_test:
-      - eval_time: 15m
+      - eval_time: 5m
+        alertname: InstanceCrashLooping
+        exp_alerts: []
+      - eval_time: 6m
         alertname: InstanceCrashLooping
         exp_alerts:
           - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
             exp_annotations:
-              summary: "Bot of tenant acme restarted 3 times in 15 minutes."
+              summary: "Bot of tenant acme restarted 3 times in the last hour."
+      - eval_time: 41m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
+            exp_annotations:
+              summary: "Bot of tenant acme restarted 3 times in the last hour."
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: cora}
+            exp_annotations:
+              summary: "Bot of tenant cora restarted 3 times in the last hour."
+      # a1's restarts have left the window and a2 has not looped yet: held
+      # by keep_firing_for, so the reschedule does not resolve the alert.
+      - eval_time: 69m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
+            exp_annotations:
+              summary: "Bot of tenant acme restarted 3 times in the last hour."
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: cora}
+            exp_annotations:
+              summary: "Bot of tenant cora restarted 3 times in the last hour."
+      - eval_time: 72m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
+            exp_annotations:
+              summary: "Bot of tenant acme restarted 3 times in the last hour."
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: cora}
+            exp_annotations:
+              summary: "Bot of tenant cora restarted 3 times in the last hour."
+      # The second reschedule gap, and the third allocation's loop; cora's
+      # restarts are over an hour old and its alert has resolved.
+      - eval_time: 139m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
+            exp_annotations:
+              summary: "Bot of tenant acme restarted 3 times in the last hour."
+      - eval_time: 142m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: acme}
+            exp_annotations:
+              summary: "Bot of tenant acme restarted 3 times in the last hour."
 
   # qm: sealed fires after a minute; unreachable only when not sealed.
   - interval: 1m
@@ -115,3 +176,37 @@ tests:
           - exp_labels: {severity: warning, kind: disk-full, instance: "n1:9100", mountpoint: "/", fstype: ext4}
             exp_annotations:
               summary: "Disk / on n1:9100 is 81% full."
+
+  # A deletion stuck before its rows were deleted (the metric counts only
+  # those over an hour old): fires at once; none stuck is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'sanholo_cloud_tenant_deletions_stalled{job="sanholo-cloud"}'
+        values: "0 0 1 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: DeletionStalled
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: DeletionStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: deletion-stalled, job: sanholo-cloud}
+            exp_annotations:
+              summary: "1 account deletion(s) stopped before the data was deleted; see /admin, Account deletions."
+
+  # Retention reported apart from the backup: a failed forget fires its own
+  # alert, a successful one is quiet.
+  - interval: 1h
+    input_series:
+      - series: 'sanholo_backup_last_retention_ok{instance="cp:9100",target="postgres"}'
+        values: "1 0"
+    alert_rule_test:
+      - eval_time: 0h
+        alertname: BackupRetentionFailed
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: BackupRetentionFailed
+        exp_alerts:
+          - exp_labels: {severity: warning, kind: backup-retention-failed, instance: "cp:9100", target: postgres}
+            exp_annotations:
+              summary: "The postgres backup retention on cp:9100 failed: snapshots older than the window may remain."

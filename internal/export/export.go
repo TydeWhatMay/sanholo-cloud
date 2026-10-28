@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,8 +51,9 @@ var (
 	// ErrLinkInvalid: the link is unknown, spent, expired, or belongs to
 	// another account. The four cases are not told apart.
 	ErrLinkInvalid = errors.New("the download link is not valid")
-	// ErrBusy: too many exports are being built right now; the link was not
-	// spent and the request can be repeated.
+	// ErrBusy: too many exports are being built right now, or this account
+	// already has one running; the link was not spent and the request can be
+	// repeated.
 	ErrBusy = errors.New("too many exports are running")
 	// ErrDeleting: the account is being deleted.
 	ErrDeleting = errors.New("the account is being deleted")
@@ -94,6 +96,12 @@ type Service struct {
 	rt  http.RoundTripper
 	sem chan struct{}
 	log *slog.Logger
+
+	// running holds the accounts with an export being built: at most one
+	// each, so one account cannot take every MaxStreams place for the
+	// length of a download.
+	mu      sync.Mutex
+	running map[string]bool
 }
 
 // New returns a Service.
@@ -116,7 +124,7 @@ func New(cfg Config) *Service {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	s := &Service{cfg: cfg, rt: cfg.Transport, sem: make(chan struct{}, cfg.MaxStreams), log: cfg.Logger}
+	s := &Service{cfg: cfg, rt: cfg.Transport, sem: make(chan struct{}, cfg.MaxStreams), log: cfg.Logger, running: map[string]bool{}}
 	if s.rt == nil {
 		s.rt = &http.Transport{
 			Proxy:                 nil, // the bot is on the private network
@@ -212,14 +220,28 @@ type Download struct {
 
 // Open spends the link and prepares the archive. The link works once: it is
 // spent here, before a byte is sent, so a second request (or a parallel one)
-// is refused. ErrBusy leaves it unspent. The caller must call Close.
+// is refused. ErrBusy (the global limit, or an export of this account
+// already running) leaves it unspent. The caller must call Close.
 func (s *Service) Open(ctx context.Context, secret, accountID string) (*Download, error) {
+	s.mu.Lock()
+	if s.running[accountID] {
+		s.mu.Unlock()
+		return nil, ErrBusy
+	}
 	select {
 	case s.sem <- struct{}{}:
 	default:
+		s.mu.Unlock()
 		return nil, ErrBusy
 	}
-	release := func() { <-s.sem }
+	s.running[accountID] = true
+	s.mu.Unlock()
+	release := func() {
+		s.mu.Lock()
+		delete(s.running, accountID)
+		s.mu.Unlock()
+		<-s.sem
+	}
 	d, err := s.open(ctx, secret, accountID)
 	if err != nil {
 		release()

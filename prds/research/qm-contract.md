@@ -23,13 +23,26 @@ plus the qm session's answers and Lance's decisions relayed on 2026-10-27.
   401). Sealed: 503 `vault_sealed` on any barrier-backed request.
 - Tenants are never enumerated from qm; SanHolo's database is the record.
 
-## Deletion (qm Part E, provisional shapes, no date)
+## Deletion (qm Part E, ADR 0024 accepted 2026-10-28; not yet deployed)
 
-- `DELETE /qm/v1/secret/metadata/<path>`: every version and the metadata.
-- `DELETE /qm/v1/secret/purge/<prefix>`: a whole tenant prefix in one
-  audited operation. Both need delete + sudo on the matching path.
-- Until it ships, offboarding = stop provisioning and stop the tenant job.
-  Part E landing is a SanHolo launch gate (account deletion, US-018).
+- `DELETE /qm/v1/secret/metadata/<path>`: every version of one path. 200
+  `{"destroyed_versions":[..]}` (flat, ascending); 204 if nothing existed.
+- `DELETE /qm/v1/secret/purge/<prefix>`: the prefix and everything under it,
+  aligned to "/". 200 `{"paths_purged":N}`; 204 if nothing existed. Over
+  qm's per-purge path limit: 400, nothing deleted.
+- No body and no parameter on either (any field is 400). Both need delete +
+  sudo on the path. Redirects are not followed.
+- 409 `kv_purge_incomplete`: the 5 s budget ran out; re-run the same call.
+  409 `kv_purge_in_progress`: an overlapping purge is running.
+- After a purge, data and metadata reads answer 204 and a new write starts
+  at version 1.
+- Rules (PRD A.6): finish or abandon a pending purge before re-onboarding a
+  tenant id; never run an old purge's retry after re-onboarding; never
+  write to a tenant while purging it. Backups of qm keep purged data until
+  they age out; a qm restore needs `sanholo-cloud deletions reapply`.
+- SanHolo uses the purge route only. Until production qm has it, the purge
+  is refused (403) and stays pending. Part E deployed is a SanHolo launch
+  gate (account deletion, US-018).
 
 ## Instance
 
@@ -39,8 +52,9 @@ It does not exist yet; URL and provisioner credentials come from Lance.
 ## Workload (tenant job)
 
 Nomad JWT login per Appendix A.4 with role `sanholo-tenant`, aud
-`qm.sanholo`; reads `secret/data/sanholo/tenants/<id>/game`; 404 means
-offboarded. Fields `api_token`, `replicant_code` (SanHolo's choice; qm
+`qm.sanholo`; reads `secret/data/sanholo/tenants/<id>/game`; 204 (empty body)
+means no such path (offboarded), as does a reply without `data`
+(soft-deleted); 404 means an unknown mount or route. Fields `api_token`, `replicant_code` (SanHolo's choice; qm
 imposes none).
 
 ## Reply shapes (confirmed from qm handlers, 2026-10-27)

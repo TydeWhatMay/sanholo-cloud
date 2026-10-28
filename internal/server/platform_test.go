@@ -14,19 +14,21 @@ import (
 const (
 	platMetricsToken = "metrics-0123456789abcdefghijklmnopqrstuv"
 	platAlertsToken  = "alerts-0123456789abcdefghijklmnopqrstuvwx"
-	amBody           = `{"version":"4","status":"firing","alerts":[{"status":"firing","fingerprint":"f1","labels":{"alertname":"QMSealed","kind":"qm-sealed"},"annotations":{"summary":"qm is sealed"}}]}`
+	amBody           = `{"version":"4","status":"firing","alerts":[{"status":"firing","fingerprint":"f1","labels":{"alertname":"QMSealed","kind":"qm-sealed","severity":"critical"},"annotations":{"summary":"qm is sealed"}}]}`
 )
 
 type recNotifier struct {
 	got  []string
+	sev  []string
 	fail bool
 }
 
-func (r *recNotifier) NotifyOperator(kind, text string) error {
+func (r *recNotifier) NotifyOperator(kind, severity, text string) error {
 	if r.fail {
 		return errors.New("queue full")
 	}
 	r.got = append(r.got, kind+": "+text)
+	r.sev = append(r.sev, severity)
 	return nil
 }
 
@@ -87,8 +89,8 @@ func TestPlatformAuth(t *testing.T) {
 			}
 		})
 	}
-	if len(n.got) != 1 || n.got[0] != "qm-sealed: qm is sealed" {
-		t.Fatalf("operator pushes = %v, want exactly the authenticated one", n.got)
+	if len(n.got) != 1 || n.got[0] != "qm-sealed: qm is sealed" || n.sev[0] != "critical" {
+		t.Fatalf("operator pushes = %v (severity %v), want exactly the authenticated one, critical", n.got, n.sev)
 	}
 }
 

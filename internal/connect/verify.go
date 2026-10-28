@@ -57,14 +57,16 @@ type deletedIdentity struct {
 //   - every table the schema gives a tenant_id column (db.TenantTables) has
 //     no row for the tenant;
 //   - no table with an account_id column (db.AccountTables) has a row for the
-//     deleted account id, and no rate-limit row is keyed by it;
+//     deleted account id, and no rate-limit row is keyed by it or by the
+//     tenant id (the push and alert-intake limits);
 //   - right after the deletion, when the address is still known: nothing in
 //     the waiting list, the invites, the outbox (the confirmation excepted),
 //     the sign-in requests or the accounts is keyed by the address or its
 //     hash. Later passes cannot look for it: the address is not kept;
-//   - qm holds no version of the tenant's game secret. Until qm ships its
-//     purge endpoint the secret cannot be removed; the recorded purge is
-//     then reported as pending instead, and qm is not asked;
+//   - qm holds no version of the tenant's game secret. While a purge is
+//     recorded as pending (the purge contract is final, ADR 0024, but until
+//     the route is deployed on the production qm it is refused with 403)
+//     the check reports it as pending instead, and qm is not asked;
 //   - Nomad has neither the job nor the volume.
 //
 // A leftover that a cleanup can remove is queued again (the secret, the
@@ -118,6 +120,11 @@ func (s *Service) verifyDeletion(ctx context.Context, tenantID string, who *dele
 		} else if n > 0 {
 			failed = append(failed, "rows remain in rate_counters")
 		}
+	}
+	if n, err := s.count(ctx, `SELECT count(*) FROM rate_counters WHERE key IN ('push:tenant:' || $1, 'alerts:tenant:' || $1)`, tenantID); err != nil {
+		read("rate_counters", err)
+	} else if n > 0 {
+		failed = append(failed, "rows remain in rate_counters")
 	}
 	if who != nil {
 		failed = append(failed, s.addressLeftovers(ctx, who)...)

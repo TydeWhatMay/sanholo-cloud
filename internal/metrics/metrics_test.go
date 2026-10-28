@@ -238,7 +238,7 @@ func TestCountersFromOtherPackages(t *testing.T) {
 		Push: func() push.Stats {
 			return push.Stats{Delivered: 11, Gone: 2, Refused: 3, GaveUp: 4, CapNotices: 5, CapDropped: 6, QueueFull: 7}
 		},
-		Alerts: func() AlertStats { return AlertStats{Pushed: 8, Deduped: 9, Failed: 10, Truncated: 12} },
+		Alerts: func() AlertStats { return AlertStats{Pushed: 8, Deduped: 9, Failed: 10, Truncated: 12, Capped: 13} },
 	})
 	want := map[string]float64{
 		`sanholo_cloud_push_messages_total{result="delivered"}`:        11,
@@ -252,6 +252,7 @@ func TestCountersFromOtherPackages(t *testing.T) {
 		`sanholo_cloud_operator_alerts_total{result="deduped"}`:        9,
 		`sanholo_cloud_operator_alerts_total{result="failed"}`:         10,
 		`sanholo_cloud_operator_alerts_total{result="truncated"}`:      12,
+		`sanholo_cloud_operator_alerts_total{result="capped"}`:         13,
 	}
 	for k, v := range want {
 		if m[k] != v {
@@ -272,5 +273,28 @@ func TestEscape(t *testing.T) {
 		if got := escape(tc.in); got != tc.want {
 			t.Errorf("escape(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A deletion stuck before the rows were deleted (tenant 'deleting', check
+// 'unchecked', not completed) counts once it is over an hour old; a recent
+// one, a checked one and a finished one do not.
+func TestStalledDeletions(t *testing.T) {
+	pool := dbtest.Migrated(t)
+	for _, q := range []string{
+		`INSERT INTO tenants (id, status) VALUES ('x1','deleting'),('x2','deleting'),('x3','deleting'),('x4','active')`,
+		`INSERT INTO tenant_deletions (tenant_key, requested_at, check_state) VALUES
+			('x1', now() - interval '2 hours', 'unchecked'),
+			('x2', now() - interval '30 minutes', 'unchecked'),
+			('x3', now() - interval '2 hours', 'pending'),
+			('x4', now() - interval '2 hours', 'unchecked')`,
+		`INSERT INTO tenant_deletions (tenant_key, requested_at, check_state, completed_at) VALUES
+			('gone', now() - interval '3 hours', 'unchecked', now())`,
+	} {
+		exec(t, pool, q)
+	}
+	m := scrape(t, &Source{DB: pool})
+	if got := m[`sanholo_cloud_tenant_deletions_stalled`]; got != 1 {
+		t.Errorf("stalled = %v, want 1 (only x1)", got)
 	}
 }

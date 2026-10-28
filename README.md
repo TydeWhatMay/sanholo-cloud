@@ -129,15 +129,16 @@ that secret from qm's metadata (`Version`, 0 when absent) and purge a tenant
 or enumerates tenants (SanHolo's database is the record), and `TestAPISurface`
 fails if one is added. A token rotation is a plain new `Put`: qm keeps 16
 versions and prunes the oldest. Deletion goes only through `PurgeTenant`,
-which uses qm's Part E purge endpoint. That endpoint has not shipped, so
-until it does a purge is refused with `ErrDenied` (the first-connect
-clean-up is best effort and logs the refusal). Qm errors map to `ErrDenied`
+which uses qm's Part E purge route. The contract is final (ADR 0024), but
+the route is not yet deployed on the production qm; until it is, a purge is
+refused (403, `ErrDenied`) and stays pending (the first-connect clean-up is
+best effort and logs the refusal). Qm errors map to `ErrDenied`
 (403, after one fresh login), `ErrSealed` (503 `vault_sealed`, also an
 `ErrUnavailable`), `ErrUnavailable` (other 5xx, 429, network, timeout) and
 `ErrProtocol`. `Ready` reads `GET /qm/v1/sys/health` and passes only when qm
 is initialized and unsealed. The wire is in `secrets/wire.go`, per the
-contract in `prds/research/qm-contract.md` (the Part E endpoints are marked
-provisional there); `secrets/qmfake` is the in-memory qm the tests use.
+contract in `prds/research/qm-contract.md` (Part E is final, ADR 0024, but not
+yet on production qm); `secrets/qmfake` is the in-memory qm the tests use.
 
 ### Game account
 
@@ -278,8 +279,9 @@ value, and drift detection ignores it.
 POST with the CSRF token). It stops the bot (without purge, then with), deletes
 the game account and instance records and writes an audit row, in one
 transaction; the tenant and the account stay. Deleting the token in qm
-(`secrets.PurgeTenant`) and the tenant's host volume then follow. Until qm ships
-its purge endpoint the purge is refused: the deletion is kept in
+(`secrets.PurgeTenant`) and the tenant's host volume then follow. Until the purge
+route (final contract, ADR 0024) is deployed on the production qm, the purge
+is refused (403) and stays pending: the deletion is kept in
 `pending_cleanups` (fixed reason phrase, attempt count) and retried every
 minute while it works. A failing deletion backs off (a minute, doubling, at most six
 hours) and is logged at error level at the 5th, 10th, 25th, 50th and 100th
@@ -342,7 +344,7 @@ The check job (`connect/verify.go`) runs after the deletion and on every cleanup
 pass: no row in any `db.TenantTables` table; no row in any table with a foreign
 key to `accounts` for the deleted account id; right after the deletion only,
 nothing keyed by the address or its hash; qm has no version of the secret (or
-"qm purge pending" while Part E is missing); Nomad has neither job nor volume.
+"qm purge pending" while the purge route is not deployed); Nomad has neither job nor volume.
 A leftover that a cleanup can remove is queued again. `/admin` lists the
 deletions with their pending cleanups and last check.
 
@@ -459,9 +461,13 @@ both during the overlap.
 - **Preferences.** Snooze-style routing, quiet hours and which kinds are sent
   are applied by the bot (`internal/alert` in the client, before the hosted sink
   is called), so the control plane does not apply them again.
-- **Operators.** `push.Service.NotifyOperator(kind, text)` pushes to every
-  subscription of a tenant that has an operator account, with a cap bucket of its
-  own. Task 3.4 calls it.
+- **Operators.** `push.Service.NotifyOperator(kind, severity, text)` pushes to
+  every subscription of a tenant that has an operator account. Operator alerts
+  have a budget of their own (`push.OperatorHourlyCap`, 30 non-critical alerts
+  an hour, then one operator notice); `critical` ones are never capped. The
+  budget is decided in the call: over it the alert is not queued and
+  `push.ErrCapped` is returned, so the Alertmanager intake does not record it
+  as pushed and pushes it on a later send. Task 3.4 calls it.
 
 ### The gate
 

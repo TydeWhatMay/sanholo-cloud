@@ -5,7 +5,9 @@
 // safe to push: one push per alert per state change, a reminder for an alert
 // that stays firing no more often than Reminder, a "Resolved" push only for
 // an alert whose firing push went out, and a bound on the alerts read per
-// request. NotifyOperator's own hourly cap (push.HourlyCap) bounds the rest.
+// request. NotifyOperator's own budget (push.OperatorHourlyCap, critical
+// alerts exempt) bounds the rest; an alert refused over it is not remembered,
+// so Alertmanager's next send of it pushes it.
 package opalert
 
 import (
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/lhaig/sanholo-cloud/internal/metrics"
+	"github.com/lhaig/sanholo-cloud/internal/push"
 )
 
 const (
@@ -43,9 +46,9 @@ const (
 // ErrBadNotification is a body that is not an Alertmanager v4 notification.
 var ErrBadNotification = errors.New("opalert: not an Alertmanager notification")
 
-// Notifier is push.Service.
+// Notifier is push.Service. severity is the alert's "severity" label.
 type Notifier interface {
-	NotifyOperator(kind, text string) error
+	NotifyOperator(kind, severity, text string) error
 }
 
 // Notification is the part of Alertmanager's webhook body that is read.
@@ -70,7 +73,7 @@ type Intake struct {
 	mu   sync.Mutex
 	seen map[string]seen
 
-	pushed, deduped, failed, truncated atomic.Uint64
+	pushed, deduped, failed, truncated, capped atomic.Uint64
 }
 
 type seen struct {
@@ -90,7 +93,7 @@ func New(n Notifier, now func() time.Time) *Intake {
 func (in *Intake) Stats() metrics.AlertStats {
 	return metrics.AlertStats{
 		Pushed: in.pushed.Load(), Deduped: in.deduped.Load(),
-		Failed: in.failed.Load(), Truncated: in.truncated.Load(),
+		Failed: in.failed.Load(), Truncated: in.truncated.Load(), Capped: in.capped.Load(),
 	}
 }
 
@@ -149,7 +152,7 @@ func (in *Intake) one(a Alert) error {
 	if !firing {
 		text = "Resolved: " + text
 	}
-	if err := in.n.NotifyOperator(kind(a), text); err != nil {
+	if err := in.n.NotifyOperator(kind(a), a.Labels["severity"], text); err != nil {
 		in.mu.Lock()
 		if known {
 			in.seen[key] = prev
@@ -157,6 +160,13 @@ func (in *Intake) one(a Alert) error {
 			delete(in.seen, key)
 		}
 		in.mu.Unlock()
+		if errors.Is(err, push.ErrCapped) {
+			// Over the operator's hourly budget: not pushed and not
+			// remembered, so Alertmanager's next send pushes it. No error:
+			// an immediate retry would meet the same cap.
+			in.capped.Add(1)
+			return nil
+		}
 		in.failed.Add(1)
 		return err
 	}

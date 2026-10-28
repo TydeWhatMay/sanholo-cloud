@@ -5,15 +5,34 @@
 groups:
   - name: sanholo-operator
     rules:
-      # US-023: instance crash-looping. Nomad's per-allocation restart
-      # counter; three restarts in 15 minutes is a loop, not a blip.
+      # US-023: instance crash-looping. Nomad's restart counter is per
+      # allocation (alloc_id label) and go-metrics creates the series at its
+      # first increment, so it appears at 1, never 0: increase() misses that
+      # first restart. The job's restart policy (internal/nomad/job.go: 3
+      # attempts in 10 minutes, mode fail) caps one allocation at 3, after
+      # which Nomad reschedules a new allocation (new alloc_id) with a
+      # delay growing to an hour. So the restarts of the last hour are
+      # counted per allocation as "highest value this hour minus the value
+      # an hour ago, or minus 0 for an allocation that did not exist then",
+      # and summed per tenant: a loop that spans reschedules adds up across
+      # allocations. keep_firing_for bridges the gap of a reschedule delayed
+      # by the full hour, when the window briefly holds fewer than three.
       - alert: InstanceCrashLooping
-        expr: sum by (tenant) (increase(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[15m])) >= 3
+        expr: |
+          sum by (tenant) (
+              max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h])
+            - (
+                last_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h] offset 1h)
+              or
+                max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h]) * 0
+            )
+          ) >= 3
+        keep_firing_for: 30m
         labels:
           severity: critical
           kind: instance-crashloop
         annotations:
-          summary: "Bot of tenant {{ $labels.tenant }} restarted {{ $value | humanize }} times in 15 minutes."
+          summary: "Bot of tenant {{ $labels.tenant }} restarted {{ $value | humanize }} times in the last hour."
 
       # The control plane gave up on an instance (state failed).
       - alert: InstanceFailed
@@ -80,6 +99,16 @@ groups:
         annotations:
           summary: "No successful {{ $labels.target }} backup on {{ $labels.instance }} for {{ $value | humanizeDuration }}."
 
+      # The retention (restic forget --prune) after the database backup
+      # failed; it runs even when the dump failed, and is reported apart.
+      - alert: BackupRetentionFailed
+        expr: sanholo_backup_last_retention_ok == 0
+        labels:
+          severity: warning
+          kind: backup-retention-failed
+        annotations:
+          summary: "The {{ $labels.target }} backup retention on {{ $labels.instance }} failed: snapshots older than the window may remain."
+
       # ... or the database backup never reported at all.
       - alert: BackupMissing
         expr: absent(sanholo_backup_last_success_timestamp_seconds{target="postgres"})
@@ -139,6 +168,17 @@ groups:
           kind: deletion-check-failed
         annotations:
           summary: "An account deletion left data behind; see /admin, Account deletions."
+
+      # An account deletion that stopped before the tenant's rows were
+      # deleted (the bot could not be stopped, the deletion log could not be
+      # written) for over an hour; the metric counts only those.
+      - alert: DeletionStalled
+        expr: sanholo_cloud_tenant_deletions_stalled > 0
+        labels:
+          severity: warning
+          kind: deletion-stalled
+        annotations:
+          summary: "{{ $value | humanize }} account deletion(s) stopped before the data was deleted; see /admin, Account deletions."
 
       - alert: CleanupStuck
         expr: sanholo_cloud_pending_cleanup_oldest_seconds > 24 * 3600

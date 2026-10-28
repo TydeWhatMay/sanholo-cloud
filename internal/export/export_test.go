@@ -151,7 +151,13 @@ func (f *fixture) addAccount(t *testing.T, tenant, email string) string {
 // link issues a link for the fixture's account and returns its secret.
 func (f *fixture) link(t *testing.T) string {
 	t.Helper()
-	l, err := f.svc.CreateLink(context.Background(), f.account, f.tenant, f.email)
+	return f.linkFor(t, f.account, f.tenant, f.email)
+}
+
+// linkFor issues a link for an account and returns its secret.
+func (f *fixture) linkFor(t *testing.T, accountID, tenant, email string) string {
+	t.Helper()
+	l, err := f.svc.CreateLink(context.Background(), accountID, tenant, email)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +271,8 @@ func TestParallelUsesOfOneLinkSpendItOnce(t *testing.T) {
 			case err == nil:
 				won.Add(1)
 				d.Close()
-			case errors.Is(err, export.ErrLinkInvalid):
+			case errors.Is(err, export.ErrLinkInvalid), errors.Is(err, export.ErrBusy):
+				// Busy: another use of the same account is running.
 				lost.Add(1)
 			default:
 				t.Errorf("open: %v", err)
@@ -690,19 +697,50 @@ func TestAtMostMaxStreamsRunAtOnceAndBusyLeavesTheLinkUnspent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := f.link(t)
-	if _, err := f.svc.Open(context.Background(), second, f.account); !errors.Is(err, export.ErrBusy) {
+	// Another account: only the global limit can refuse it.
+	bob := f.other
+	second := f.linkFor(t, bob, f.otherTen, "bob@example.org")
+	if _, err := f.svc.Open(context.Background(), second, bob); !errors.Is(err, export.ErrBusy) {
 		t.Fatalf("second stream: %v, want ErrBusy", err)
 	}
-	if ok, _ := f.svc.Valid(context.Background(), second, f.account); !ok {
+	if ok, _ := f.svc.Valid(context.Background(), second, bob); !ok {
 		t.Error("a refused-busy request spent the link")
 	}
 	first.Close()
-	if d, err := f.svc.Open(context.Background(), second, f.account); err != nil {
+	if d, err := f.svc.Open(context.Background(), second, bob); err != nil {
 		t.Errorf("after the first finished: %v", err)
 	} else {
 		d.Close()
 	}
+}
+
+// One account runs one export at a time, however many places are free; the
+// refused request leaves its link unspent and other accounts are not held up.
+func TestOneRunningExportPerAccount(t *testing.T) {
+	f := newFixture(t, func(c *export.Config) { c.MaxStreams = 4 })
+	first, err := f.svc.Open(context.Background(), f.link(t), f.account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := f.link(t)
+	if _, err := f.svc.Open(context.Background(), second, f.account); !errors.Is(err, export.ErrBusy) {
+		t.Fatalf("a second export of the same account: %v, want ErrBusy", err)
+	}
+	if ok, _ := f.svc.Valid(context.Background(), second, f.account); !ok {
+		t.Error("a refused-busy request spent the link")
+	}
+	bob := f.other
+	other, err := f.svc.Open(context.Background(), f.linkFor(t, bob, f.otherTen, "bob@example.org"), bob)
+	if err != nil {
+		t.Fatalf("another account was held up: %v", err)
+	}
+	other.Close()
+	first.Close()
+	d, err := f.svc.Open(context.Background(), second, f.account)
+	if err != nil {
+		t.Fatalf("after the first finished: %v", err)
+	}
+	d.Close()
 }
 
 func TestDownloadStopsWhenTheContextEnds(t *testing.T) {

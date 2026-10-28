@@ -287,9 +287,10 @@ func mayHaveWritten(err error) bool {
 // purge removes what this tenant has in qm. It is called only for a first
 // connect, when the tenant had no game account recorded, so nothing of value
 // is lost. Best effort: a failure is logged (the error carries no secret)
-// and does not change what the customer sees. Until qm's purge endpoint
-// ships (Part E) every purge fails with ErrDenied; the stray secret is the
-// tenant's own, unused, and removed by the next purge.
+// and does not change what the customer sees. The purge contract is final
+// (ADR 0024); until the route is deployed on the production qm every purge
+// fails with ErrDenied (403). The stray secret is the tenant's own, unused,
+// and removed by the next purge.
 func (s *Service) purge(ctx context.Context, tenantID string) {
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()

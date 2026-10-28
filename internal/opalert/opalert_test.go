@@ -7,24 +7,31 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lhaig/sanholo-cloud/internal/push"
 )
 
-type sent struct{ kind, text string }
+type sent struct{ kind, severity, text string }
 
 type fakeNotifier struct {
-	mu   sync.Mutex
-	got  []sent
-	fail int // fail the next n calls
+	mu     sync.Mutex
+	got    []sent
+	fail   int // fail the next n calls
+	capped int // refuse the next n non-critical calls as over the cap
 }
 
-func (f *fakeNotifier) NotifyOperator(kind, text string) error {
+func (f *fakeNotifier) NotifyOperator(kind, severity, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail > 0 {
 		f.fail--
 		return errors.New("queue full")
 	}
-	f.got = append(f.got, sent{kind, text})
+	if f.capped > 0 && severity != "critical" {
+		f.capped--
+		return push.ErrCapped
+	}
+	f.got = append(f.got, sent{kind, severity, text})
 	return nil
 }
 
@@ -82,14 +89,14 @@ func TestFiringThenResolved(t *testing.T) {
 		alert   Alert
 		want    []sent // pushes this step adds
 	}{
-		{"first firing pushes", 0, firing("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "qm is sealed"}}},
+		{"first firing pushes", 0, firing("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "", "qm is sealed"}}},
 		{"repeat within the reminder is quiet", 5 * time.Minute, firing("fp1", "qm-sealed", "qm is sealed"), nil},
 		{"one second before the reminder: quiet", Reminder - 5*time.Minute - time.Second, firing("fp1", "qm-sealed", "qm is sealed"), nil},
-		{"at the reminder: pushes again", time.Second, firing("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "qm is sealed"}}},
-		{"resolved pushes once", time.Minute, resolved("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "Resolved: qm is sealed"}}},
+		{"at the reminder: pushes again", time.Second, firing("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "", "qm is sealed"}}},
+		{"resolved pushes once", time.Minute, resolved("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "", "Resolved: qm is sealed"}}},
 		{"resolved again is quiet", time.Minute, resolved("fp1", "qm-sealed", "qm is sealed"), nil},
 		{"resolved never fired is quiet", 0, resolved("fp2", "disk-full", "disk"), nil},
-		{"firing again after resolve pushes", time.Minute, firing("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "qm is sealed"}}},
+		{"firing again after resolve pushes", time.Minute, firing("fp1", "qm-sealed", "qm is sealed"), []sent{{"qm-sealed", "", "qm is sealed"}}},
 	}
 	for _, s := range steps {
 		before := len(f.got)
@@ -204,10 +211,10 @@ type slowNotifier struct {
 	release chan struct{}
 }
 
-func (s *slowNotifier) NotifyOperator(kind, text string) error {
+func (s *slowNotifier) NotifyOperator(kind, severity, text string) error {
 	s.entered <- struct{}{}
 	<-s.release
-	return s.fakeNotifier.NotifyOperator(kind, text)
+	return s.fakeNotifier.NotifyOperator(kind, severity, text)
 }
 
 // Two copies of one notification at once (an Alertmanager HA pair) push
@@ -233,5 +240,32 @@ func TestConcurrentCopiesPushOnce(t *testing.T) {
 	<-done
 	if len(sn.got) != 1 {
 		t.Fatalf("pushes = %d, want 1", len(sn.got))
+	}
+}
+
+// An alert refused over the operator's budget is neither an error (an
+// immediate retry would meet the same cap) nor remembered: the next send of
+// it pushes it.
+func TestCappedAlertIsPushedOnTheNextSend(t *testing.T) {
+	in, f, c := newIntake()
+	f.capped = 1
+	a := firing("a", "tenant-throttled", "throttled")
+	a.Labels["severity"] = "warning"
+	n := Notification{Alerts: []Alert{a}}
+	if err := in.Handle(n); err != nil {
+		t.Fatalf("a capped alert is not a failure: %v", err)
+	}
+	if len(f.got) != 0 {
+		t.Fatalf("pushed while capped: %v", f.got)
+	}
+	if st := in.Stats(); st.Capped != 1 || st.Pushed != 0 || st.Failed != 0 {
+		t.Fatalf("stats = %+v", st)
+	}
+	c.add(5 * time.Minute) // Alertmanager's group_interval
+	if err := in.Handle(n); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.got) != 1 || f.got[0].severity != "warning" {
+		t.Fatalf("next send pushed %v, want the capped alert", f.got)
 	}
 }

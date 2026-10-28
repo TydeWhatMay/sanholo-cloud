@@ -267,8 +267,9 @@ func (c *Client) Version(ctx context.Context, tenantID string) (int, error) {
 // operation, then checks that the game path is gone. It is the only
 // deletion path. Safe to repeat.
 //
-// PROVISIONAL: the purge endpoint is qm Part E, not shipped. Until it is,
-// qm refuses this (403, ErrDenied) and nothing is removed.
+// The purge contract is final (qm Part E, ADR 0024), but the route is not
+// yet deployed on the production qm. Until it is, qm refuses the purge (403,
+// ErrDenied), nothing is removed and the cleanup stays pending.
 func (c *Client) PurgeTenant(ctx context.Context, tenantID string) error {
 	if err := c.check(tenantID); err != nil {
 		return err
@@ -287,11 +288,12 @@ func (c *Client) PurgeTenant(ctx context.Context, tenantID string) error {
 	return nil
 }
 
-// absent reports a metadata read that found no path. qm answers 204 with an
-// empty body for a missing path; 404 means an unknown mount or route, and is
-// read as missing too, defensively.
+// absent reports a metadata read that found no path: qm answers 204 with an
+// empty body. A 404 means an unknown mount or route (a misconfigured prefix,
+// a qm without the route); it is ErrProtocol, never "absent", so a purge and
+// its verification cannot pass against the wrong path.
 func absent(status int) bool {
-	return status == http.StatusNoContent || status == http.StatusNotFound
+	return status == http.StatusNoContent
 }
 
 // purgeAttempts bounds the re-runs of a purge that ran out of qm's time
@@ -344,15 +346,12 @@ func (c *Client) do(ctx context.Context, op string, k call) (int, []byte, error)
 			return status, nil, err
 		}
 	}
-	return c.result(op, k, status, body)
+	return c.result(op, status, body)
 }
 
-func (c *Client) result(op string, k call, status int, body []byte) (int, []byte, error) {
-	switch {
-	case status >= 200 && status < 300:
+func (c *Client) result(op string, status int, body []byte) (int, []byte, error) {
+	if status >= 200 && status < 300 {
 		return status, body, nil
-	case status == http.StatusNotFound && k.okNotFound:
-		return status, nil, nil
 	}
 	c.log.Warn("secrets: qm refused", "op", op, "status", status)
 	return status, nil, &Error{Op: op, Status: status, Err: statusError(status, body)}
