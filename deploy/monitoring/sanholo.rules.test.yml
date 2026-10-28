@@ -210,3 +210,20 @@ tests:
           - exp_labels: {severity: warning, kind: backup-retention-failed, instance: "cp:9100", target: postgres}
             exp_annotations:
               summary: "The postgres backup retention on cp:9100 failed: snapshots older than the window may remain."
+
+  # A Nomad client agent restart resets the counter: alloc d1 had 2 restarts,
+  # its series vanishes at 60m and comes back at 1, then it loops (70-72m).
+  - interval: 1m
+    input_series:
+      - series: 'nomad_client_allocs_restart{exported_job="sanholo-tenant-dora",tenant="dora",alloc_id="d1"}'
+        values: "2x60 _x9 1 2 3 3x100"
+    alert_rule_test:
+      - eval_time: 73m
+        alertname: InstanceCrashLooping
+        exp_alerts:
+          - exp_labels: {severity: critical, kind: instance-crashloop, tenant: dora}
+            exp_annotations:
+              summary: "Bot of tenant dora restarted 3 times in the last hour."
+      - eval_time: 30m
+        alertname: InstanceCrashLooping
+        exp_alerts: []

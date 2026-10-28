@@ -556,7 +556,7 @@ func TestPendingQMPurgeKeepsTheTombstoneAndTheCheckReportsIt(t *testing.T) {
 	if state, detail, _, _ := deletion(t, d.pool, tenant); state != "pending" || !strings.Contains(detail, "qm purge pending") {
 		t.Errorf("after a pass: %s %q", state, detail)
 	}
-	// Part E ships.
+	// Production qm gets the Part E purge route.
 	d.qm.SetDeleteAllowed(true)
 	d.passes()
 	if _, ok := d.qm.Stored(qmPath(tenant)); ok {

@@ -30,7 +30,7 @@ const (
 	OperatorHourlyCap = 30
 	// OperatorCapNotice is the single operator push sent when that budget
 	// is spent.
-	OperatorCapNotice = "Further non-critical platform alerts are held back this hour. Alertmanager sends them again; critical alerts still arrive."
+	OperatorCapNotice = "Further non-critical platform alerts are held back this hour. Firing ones arrive within the hour; critical alerts are never held back."
 )
 
 // operatorBucket is the cap bucket of operator alerts; no tenant id can

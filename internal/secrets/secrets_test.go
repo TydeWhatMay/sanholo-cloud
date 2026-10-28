@@ -354,8 +354,7 @@ func TestPurgeAcceptsOKAndNoContent(t *testing.T) {
 	}
 }
 
-// qm answers a metadata read of a missing path with 204 and an empty body;
-// 404 (unknown mount or route) is read as missing too.
+// qm answers a metadata read of a missing path with 204 and an empty body.
 func TestMissingPathReadsAsAbsent(t *testing.T) {
 	c, f, _ := setup(t)
 	ctx := context.Background()
@@ -496,7 +495,7 @@ func TestPurgeFailsLoudlyIfSecretRemains(t *testing.T) {
 	}
 }
 
-// Before Part E ships the provisioner has no delete grant: the purge is
+// Until production qm has Part E the provisioner has no delete grant: the purge is
 // refused and says so, and nothing is removed.
 func TestPurgeBeforePartEIsDenied(t *testing.T) {
 	c, f, _ := setup(t)

@@ -398,8 +398,10 @@ through AhaSend, which already sends the control plane's mail.
   non-critical alerts an hour (the rule's `severity` label), then a single
   operator notice. Alerts with `severity: critical` are never capped. An alert
   refused over the budget is not recorded as pushed (counted as
-  `sanholo_cloud_operator_alerts_total{result="capped"}`) and is pushed when
-  Alertmanager sends it again in a later hour.
+  `sanholo_cloud_operator_alerts_total{result="capped"}`); Alertmanager repeats
+  a firing alert every hour (`repeat_interval: 1h`), so it is pushed within
+  about an hour. A capped "resolved" is not sent again: Alertmanager sends a
+  resolution once.
 - A push that cannot be queued answers 503; Alertmanager retries and only the
   missed alerts are pushed.
 - The control plane is the push path, so an alert about the control plane

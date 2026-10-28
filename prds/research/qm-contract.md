@@ -9,7 +9,8 @@ plus the qm session's answers and Lance's decisions relayed on 2026-10-27.
   {"role_id","secret_id"}` -> `auth.client_token`, sent as `X-QM-Token`;
   extend with `POST /qm/v1/auth/token/renew-self`; log in again on expiry.
   role_id and secret_id are delivered out of band by Lance.
-- Interim grants (until qm Part E ships): create, update on
+- Interim grants (Part E adds delete + sudo on the purge route when it is
+  deployed): create, update on
   `secret/data/sanholo/tenants/*`; read on `secret/metadata/sanholo/tenants/*`
   (version numbers and times, never values). No list, no destroy, no sudo.
 - Write: `POST /qm/v1/secret/data/<path>` body `{"data":{...}}`, reply flat

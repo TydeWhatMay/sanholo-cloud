@@ -433,7 +433,7 @@ func TestCommitFailureAfterQMWritePurges(t *testing.T) {
 	}
 }
 
-// Until qm Part E ships the purge is refused (403). The first-connect clean-up
+// Until production qm has the Part E purge route the purge is refused (403). The first-connect clean-up
 // is best effort: the customer sees the same result, and the log says what
 // happened without a secret.
 func TestPurgeRefusedDoesNotChangeTheResult(t *testing.T) {

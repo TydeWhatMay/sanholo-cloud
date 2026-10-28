@@ -19,16 +19,20 @@ route:
   receiver: sanholo-operator
   # One notification per alert and subject; the intake pushes each alert
   # once per state change and repeats a firing one at most every 3 hours.
+  # The hourly repeat costs nothing (the intake drops repeats) and is what
+  # retries a firing alert the operator push budget held back.
   group_by: [alertname, tenant, target, instance]
   group_wait: 30s
   group_interval: 5m
-  repeat_interval: 4h
+  repeat_interval: 1h
   routes:
     # Alerts the push path cannot deliver while they fire: email as well
     # (continue), then the push route below like every other alert.
     - receiver: operator-email
       matchers: [alertname=~"ControlPlaneDown|ControlPlaneDatabaseDown"]
       continue: true
+      # Email has no dedup of its own: repeat every 4 hours while it fires.
+      repeat_interval: 4h
     # Everything, including the two above, is pushed.
     - receiver: sanholo-operator
 

@@ -556,7 +556,7 @@ func TestParseAlert(t *testing.T) {
 // Operator alerts, through the Alertmanager intake, have a budget of their
 // own: 31 non-critical alerts spend it (30 pushes and one operator notice),
 // a critical one still pushes, a tenant is not affected, and the capped
-// alert is pushed when Alertmanager sends it again in the next window.
+// alert is pushed when Alertmanager repeats it (hourly) in the next window.
 func TestOperatorBudgetIsOwnAndCriticalIsNeverCapped(t *testing.T) {
 	e := newEnv(t)
 	op := seed(t, e.pool, "ops", true)

@@ -19,13 +19,25 @@ groups:
       # by the full hour, when the window briefly holds fewer than three.
       - alert: InstanceCrashLooping
         expr: |
+          # Per allocation, the larger of: the highest count this hour minus
+          # the count an hour ago (a new allocation's series appears at 1, so
+          # it counts from 0), floored at 0; and floor(increase()), which
+          # survives a counter reset when the Nomad client agent restarts.
           sum by (tenant) (
-              max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h])
-            - (
-                last_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h] offset 1h)
-              or
-                max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h]) * 0
+            (
+                clamp_min(
+                    max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h])
+                  - (
+                      last_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h] offset 1h)
+                    or
+                      max_over_time(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h]) * 0
+                  ),
+                  0
+                )
+              >= floor(increase(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h]))
             )
+            or
+              floor(increase(nomad_client_allocs_restart{exported_job=~"sanholo-tenant-.+"}[1h]))
           ) >= 3
         keep_firing_for: 30m
         labels:
