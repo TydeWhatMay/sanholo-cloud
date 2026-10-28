@@ -102,7 +102,9 @@ func runDeletions(ctx context.Context, args []string, out io.Writer) error {
 	return reapplyDeletions(ctx, conn, path, out)
 }
 
-// reapplyDeletions applies the log through conn and reports each tenant.
+// reapplyDeletions applies the log through conn and reports each tenant. It
+// also serves after a qm restore: a tenant the database no longer holds is
+// purged from qm again.
 func reapplyDeletions(ctx context.Context, conn *connect.Service, path string, out io.Writer) error {
 	entries, err := deletionlog.Read(path)
 	if err != nil {
@@ -118,6 +120,13 @@ func reapplyDeletions(ctx context.Context, conn *connect.Service, path string, o
 		res, err := conn.DeleteTenant(ctx, connect.ActorCLI, e.Tenant)
 		switch {
 		case errors.Is(err, connect.ErrNoAccount):
+			// The database holds nothing, but a restored qm may: purge it
+			// (a purge of nothing is a no-op).
+			if perr := conn.PurgeQM(ctx, e.Tenant); perr != nil {
+				failed++
+				_, _ = fmt.Fprintf(out, "%s: nothing in the database; qm purge failed: %v\n", e.Tenant, perr)
+				continue
+			}
 			_, _ = fmt.Fprintf(out, "%s: nothing to delete\n", e.Tenant)
 		case err != nil:
 			failed++

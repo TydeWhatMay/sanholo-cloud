@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -377,6 +378,68 @@ func TestMissingPathReadsAsAbsent(t *testing.T) {
 		if err := c.PurgeTenant(ctx, "t1"); err != nil {
 			t.Errorf("status %d: purge: %v", status, err)
 		}
+	}
+}
+
+// qm's 5 s budget can run out part way (409 kv_purge_incomplete); the same
+// purge is sent again and finishes it.
+func TestPurgeRerunsAnIncompletePurge(t *testing.T) {
+	c, f, _ := setup(t)
+	ctx := context.Background()
+	if err := c.Put(ctx, "t1", creds); err != nil {
+		t.Fatal(err)
+	}
+	var purges atomic.Int32
+	f.SetOverride(func(r qmfake.Request) (int, string, bool) {
+		if r.Method == http.MethodDelete && purges.Add(1) == 1 {
+			return http.StatusConflict, `{"code":"kv_purge_incomplete"}`, true
+		}
+		return 0, "", false
+	})
+	if err := c.PurgeTenant(ctx, "t1"); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n := purges.Load(); n != 2 {
+		t.Fatalf("purge requests = %d, want 2", n)
+	}
+	if v, err := c.Version(ctx, "t1"); err != nil || v != 0 {
+		t.Fatalf("version after purge = %d, %v", v, err)
+	}
+}
+
+// A purge that keeps running out of time gives up after a few tries and is
+// retried later as unavailable, not as a protocol fault.
+func TestPurgeIncompleteForGoodIsUnavailable(t *testing.T) {
+	c, f, _ := setup(t)
+	var purges atomic.Int32
+	f.SetOverride(func(r qmfake.Request) (int, string, bool) {
+		if r.Method == http.MethodDelete {
+			purges.Add(1)
+			return http.StatusConflict, `{"code":"kv_purge_incomplete"}`, true
+		}
+		return 0, "", false
+	})
+	err := c.PurgeTenant(context.Background(), "t1")
+	if !errors.Is(err, secrets.ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if n := purges.Load(); n != 3 {
+		t.Fatalf("purge requests = %d, want 3", n)
+	}
+}
+
+// 409 kv_purge_in_progress means offboarding is running elsewhere: a
+// temporary state, retried later.
+func TestPurgeInProgressIsUnavailable(t *testing.T) {
+	c, f, _ := setup(t)
+	f.SetOverride(func(r qmfake.Request) (int, string, bool) {
+		if r.Method == http.MethodDelete {
+			return http.StatusConflict, `{"code":"kv_purge_in_progress"}`, true
+		}
+		return 0, "", false
+	})
+	if err := c.PurgeTenant(context.Background(), "t1"); !errors.Is(err, secrets.ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
 }
 
@@ -1125,11 +1188,17 @@ func TestFakeImplementsPartE(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
-	if s := del("/qm/v1/secret/metadata/sanholo/tenants/a/other"); s != 204 || f.Live("sanholo/tenants/a/") != 1 {
+	if s := del("/qm/v1/secret/metadata/sanholo/tenants/a/other"); s != 200 || f.Live("sanholo/tenants/a/") != 1 {
 		t.Fatalf("delete one path: %d, %d left", s, f.Live("sanholo/tenants/a/"))
 	}
-	if s := del("/qm/v1/secret/purge/sanholo/tenants/a"); s != 204 || f.Live("sanholo/tenants/a/") != 0 || f.Live("sanholo/tenants/ab/") != 1 {
+	if s := del("/qm/v1/secret/purge/sanholo/tenants/a"); s != 200 || f.Live("sanholo/tenants/a/") != 0 || f.Live("sanholo/tenants/ab/") != 1 {
 		t.Fatalf("purge: %d", s)
+	}
+	if s := del("/qm/v1/secret/purge/sanholo/tenants/a"); s != 204 {
+		t.Fatalf("purge of nothing: %d, want 204", s)
+	}
+	if s := del("/qm/v1/secret/purge/sanholo/tenants/ab?version=1"); s != 400 || f.Live("sanholo/tenants/ab/") != 1 {
+		t.Fatalf("purge with a field: %d, want 400 and nothing removed", s)
 	}
 	f.SetDeleteAllowed(false)
 	if s := del("/qm/v1/secret/purge/sanholo/tenants/ab"); s != 403 || f.Live("sanholo/tenants/ab/") != 1 {

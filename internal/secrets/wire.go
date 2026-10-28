@@ -44,7 +44,10 @@ import (
 //	purge a prefix:   DELETE <addr>/qm/v1/secret/purge/<prefix>
 //	                  (a whole tenant prefix in one audited operation)
 //	                  -> {"paths_purged":N} (flat), or 204 when nothing
-//	                  existed; a version parameter is refused (400)
+//	                  existed; any body or parameter is refused (400), as
+//	                  is a prefix over qm's path limit (nothing deleted).
+//	                  409 kv_purge_incomplete: re-run the same purge;
+//	                  409 kv_purge_in_progress: an overlapping purge runs.
 //
 // The error body shape is not in the contract. errorCode accepts the
 // likely ones ({"code":..}, {"error":{"code":..}}, {"error":".."}).
@@ -65,6 +68,12 @@ const (
 	gameLeaf    = "game"
 
 	codeSealed = "vault_sealed"
+	// codePurgeIncomplete: qm's time budget ran out part way; the same
+	// purge, sent again, finishes it.
+	codePurgeIncomplete = "kv_purge_incomplete"
+	// codePurgeInProgress: an overlapping purge is running (offboarding in
+	// progress).
+	codePurgeInProgress = "kv_purge_in_progress"
 
 	// defaultLease is assumed when qm reports no usable lease duration.
 	defaultLease = 15 * time.Minute
@@ -211,6 +220,10 @@ func errorCode(body []byte) string {
 
 // statusError maps a non-success HTTP status (and, for 503, the error code)
 // to a typed error. It never keeps the response body.
+// errPurgeIncomplete is qm's 409 kv_purge_incomplete. It is unavailable to
+// callers; PurgeTenant re-sends the purge on it.
+var errPurgeIncomplete = fmt.Errorf("%w: qm purge incomplete", ErrUnavailable)
+
 func statusError(status int, body []byte) error {
 	switch {
 	case status == http.StatusForbidden:
@@ -218,6 +231,10 @@ func statusError(status int, body []byte) error {
 	case status == http.StatusServiceUnavailable && errorCode(body) == codeSealed:
 		return ErrSealed
 	case status == http.StatusTooManyRequests || status >= 500:
+		return ErrUnavailable
+	case status == http.StatusConflict && errorCode(body) == codePurgeIncomplete:
+		return errPurgeIncomplete
+	case status == http.StatusConflict && errorCode(body) == codePurgeInProgress:
 		return ErrUnavailable
 	default:
 		// Includes 401, which qm never sends.

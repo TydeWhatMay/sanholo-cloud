@@ -54,6 +54,8 @@ func TestReapplyDeletesAgainWhatTheLogRecords(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
+	// A restored qm holds a secret for a tenant this database has forgotten.
+	qm.Seed("sanholo/tenants/never-existed-here/game", map[string]string{"api_token": "x", "replicant_code": "y"})
 	path := filepath.Join(t.TempDir(), "deletions.jsonl")
 	log := deletionlog.New(path)
 	for _, tenant := range []string{"deleted-later", "never-existed-here", "deleted-later", "half-deleted"} {
@@ -81,6 +83,9 @@ func TestReapplyDeletesAgainWhatTheLogRecords(t *testing.T) {
 	if waiting != 0 {
 		t.Error("the restored waiting-list entry of a deleted account came back")
 	}
+	if n := qm.Live("sanholo/tenants/never-existed-here/"); n != 0 {
+		t.Errorf("a restored qm secret of a deleted tenant survived the reapply (%d paths)", n)
+	}
 	if audits != 1 { // half-deleted was already marked: no second mark
 		t.Errorf("%d cli audit rows, want 1 (the half-deleted tenant is not marked twice)", audits)
 	}
@@ -93,6 +98,35 @@ func TestReapplyDeletesAgainWhatTheLogRecords(t *testing.T) {
 	out.Reset()
 	if err := reapplyDeletions(ctx, conn, path, &out); err != nil || !strings.Contains(out.String(), "deleted-later: nothing to delete") {
 		t.Errorf("second run: %v\n%s", err, out.String())
+	}
+}
+
+// Before qm can purge (Part E) a logged tenant's qm purge is refused; the
+// run says so and fails, so the operator runs it again later.
+func TestReapplyReportsARefusedQMPurge(t *testing.T) {
+	pool := dbtest.Migrated(t)
+	ctx := context.Background()
+	qm := qmfake.New(t, "cp-token")
+	qm.SetDeleteAllowed(false)
+	sec, err := secrets.New(secrets.Config{Addr: qm.URL(), Token: "cp-token", Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc, err := game.New(game.Config{BaseURL: gamefake.New(t).URL(), Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := connect.New(pool, sec, gc, slog.New(slog.DiscardHandler), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "deletions.jsonl")
+	if err := deletionlog.New(path).Append(deletionlog.Entry{At: time.Now(), Tenant: "gone-tenant", Account: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := reapplyDeletions(ctx, conn, path, &out); err == nil || !strings.Contains(out.String(), "gone-tenant: nothing in the database; qm purge failed") {
+		t.Fatalf("err = %v\n%s", err, out.String())
 	}
 }
 

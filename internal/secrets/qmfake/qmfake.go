@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,9 +255,9 @@ func (f *Fake) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(p, metaPrefix) && r.Method == http.MethodGet && r.URL.Query().Get("list") == "":
 		f.metadata(w, strings.TrimPrefix(p, metaPrefix))
 	case strings.HasPrefix(p, metaPrefix) && r.Method == http.MethodDelete && f.deleteAllowed:
-		f.deleteTree(w, strings.TrimPrefix(p, metaPrefix), false)
+		f.deleteTree(w, r, b, strings.TrimPrefix(p, metaPrefix), false)
 	case strings.HasPrefix(p, purgePrefix) && r.Method == http.MethodDelete && f.deleteAllowed:
-		f.deleteTree(w, strings.TrimPrefix(p, purgePrefix), true)
+		f.deleteTree(w, r, b, strings.TrimPrefix(p, purgePrefix), true)
 	default:
 		// Includes GET of a data path, any list and any destroy: the
 		// policy has no read, no list and no destroy.
@@ -336,21 +337,38 @@ func (f *Fake) metadata(w http.ResponseWriter, path string) {
 }
 
 // deleteTree removes one path (tree=false) or a whole prefix, matching on a
-// segment boundary so that "abc" does not take "abc-d" with it.
-func (f *Fake) deleteTree(w http.ResponseWriter, target string, tree bool) {
-	target = strings.TrimSuffix(target, "/")
-	found := false
-	for p := range f.secrets {
-		if p == target || (tree && strings.HasPrefix(p, target+"/")) {
-			delete(f.secrets, p)
-			found = true
-		}
-	}
-	if !found {
-		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"not found"}}`)
+// segment boundary so that "abc" does not take "abc-d" with it. It answers
+// like qm Part E (ADR 0024): flat 200 bodies, 204 when nothing existed, 400
+// for any body or query parameter.
+func (f *Fake) deleteTree(w http.ResponseWriter, r *http.Request, body []byte, target string, tree bool) {
+	if len(body) > 0 || r.URL.RawQuery != "" {
+		reply(w, http.StatusBadRequest, `{"error":{"code":"bad_request","message":"no fields accepted"}}`)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	target = strings.TrimSuffix(target, "/")
+	var paths int
+	var destroyed []int
+	for p, e := range f.secrets {
+		if p == target || (tree && strings.HasPrefix(p, target+"/")) {
+			for _, v := range e.vers {
+				destroyed = append(destroyed, v.n)
+			}
+			delete(f.secrets, p)
+			paths++
+		}
+	}
+	if paths == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var out []byte
+	if tree {
+		out, _ = json.Marshal(map[string]int{"paths_purged": paths})
+	} else {
+		sort.Ints(destroyed)
+		out, _ = json.Marshal(map[string][]int{"destroyed_versions": destroyed})
+	}
+	reply(w, http.StatusOK, string(out))
 }
 
 func reply(w http.ResponseWriter, status int, body string) {

@@ -85,6 +85,24 @@ func (s *Service) DeleteTenant(ctx context.Context, actor, tenantID string) (Del
 	return s.deleteTenant(ctx, tenantID, actor, false)
 }
 
+// PurgeQM removes what qm holds for a tenant that has no account here any
+// more. It is for `deletions reapply` after a qm restore: qm's backups keep a
+// purged tenant, and restoring one brings it back while this database (not
+// restored) no longer knows the tenant. A tenant that still has an account
+// is refused. Without qm it does nothing.
+func (s *Service) PurgeQM(ctx context.Context, tenantID string) error {
+	if !s.sec.Enabled() {
+		return nil
+	}
+	if _, err := s.accountOf(ctx, tenantID); !errors.Is(err, ErrNoAccount) {
+		if err == nil {
+			return errors.New("connect: the tenant has an account")
+		}
+		return err
+	}
+	return s.sec.PurgeTenant(ctx, tenantID)
+}
+
 type accountRef struct{ id, email, emailHash string }
 
 func (s *Service) accountOf(ctx context.Context, tenantID string) (accountRef, error) {

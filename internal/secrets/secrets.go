@@ -273,7 +273,7 @@ func (c *Client) PurgeTenant(ctx context.Context, tenantID string) error {
 	if err := c.check(tenantID); err != nil {
 		return err
 	}
-	if _, _, err := c.do(ctx, "purge", purgeCall(tenantPrefix(tenantID))); err != nil {
+	if err := c.purgeOnce(ctx, tenantID); err != nil {
 		return err
 	}
 	status, _, err := c.do(ctx, "purge", metaCall(gamePath(tenantID)))
@@ -292,6 +292,22 @@ func (c *Client) PurgeTenant(ctx context.Context, tenantID string) error {
 // read as missing too, defensively.
 func absent(status int) bool {
 	return status == http.StatusNoContent || status == http.StatusNotFound
+}
+
+// purgeAttempts bounds the re-runs of a purge that ran out of qm's time
+// budget; past it the pending cleanup retries later.
+const purgeAttempts = 3
+
+// purgeOnce sends the purge, re-sending it while qm reports that its time
+// budget ran out part way (each re-run carries on where the last stopped).
+func (c *Client) purgeOnce(ctx context.Context, tenantID string) error {
+	var err error
+	for range purgeAttempts {
+		if _, _, err = c.do(ctx, "purge", purgeCall(tenantPrefix(tenantID))); !errors.Is(err, errPurgeIncomplete) {
+			return err
+		}
+	}
+	return err
 }
 
 func (c *Client) check(tenantID string) error {
