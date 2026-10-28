@@ -24,17 +24,28 @@ plus the qm session's answers and Lance's decisions relayed on 2026-10-27.
   401). Sealed: 503 `vault_sealed` on any barrier-backed request.
 - Tenants are never enumerated from qm; SanHolo's database is the record.
 
-## Deletion (qm Part E, ADR 0024 accepted 2026-10-28; not yet deployed)
+## Deletion (qm Part E, ADR 0024; on qm main 535ca51 + 44dea3a, not yet on production)
 
 - `DELETE /qm/v1/secret/metadata/<path>`: every version of one path. 200
   `{"destroyed_versions":[..]}` (flat, ascending); 204 if nothing existed.
 - `DELETE /qm/v1/secret/purge/<prefix>`: the prefix and everything under it,
-  aligned to "/". 200 `{"paths_purged":N}`; 204 if nothing existed. Over
-  qm's per-purge path limit: 400, nothing deleted.
+  aligned to "/". 200 `{"paths_purged":N}`; 204 if nothing existed. More
+  than 150 secrets at and under the prefix (counting the prefix's own): 400,
+  nothing deleted; purge a narrower prefix. Listing that overruns half the
+  time budget: 400, nothing deleted. SanHolo holds one secret per tenant,
+  so neither applies.
 - No body and no parameter on either (any field is 400). Both need delete +
   sudo on the path. Redirects are not followed.
-- 409 `kv_purge_incomplete`: the 5 s budget ran out; re-run the same call.
-  409 `kv_purge_in_progress`: an overlapping purge is running.
+- 409 `kv_purge_incomplete`: the call's time budget (about 2.5 s; 6-40
+  secrets on the file backend, about 15 on raft) ran out; re-run the same
+  call until 204. One secret finishes in one call. 409
+  `kv_purge_in_progress`: an overlapping purge is running, or a write under
+  a prefix being purged.
+- Revoke or deny a tenant's writers before purging. SanHolo's tenant row
+  lock serialises its own writes and purges, and the tenant's instance only
+  reads.
+- A `../` path is 403 for any caller with a policy (only root gets a 307).
+  A LIST of a purged prefix is 200 `{"keys": []}`; SanHolo has no list grant.
 - After a purge, data and metadata reads answer 204 and a new write starts
   at version 1.
 - Rules (PRD A.6): finish or abandon a pending purge before re-onboarding a
