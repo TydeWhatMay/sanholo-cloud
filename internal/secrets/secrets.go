@@ -253,7 +253,7 @@ func (c *Client) Version(ctx context.Context, tenantID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if status == http.StatusNotFound {
+	if absent(status) {
 		return 0, nil
 	}
 	v, err := decodeCurrentVersion(body)
@@ -280,11 +280,18 @@ func (c *Client) PurgeTenant(ctx context.Context, tenantID string) error {
 	if err != nil {
 		return err
 	}
-	if status != http.StatusNotFound {
+	if !absent(status) {
 		return &Error{Op: "purge", Err: fmt.Errorf("%w: the secret is still present after the purge", ErrProtocol)}
 	}
 	c.log.Info("secrets: purged", "tenant", tenantID)
 	return nil
+}
+
+// absent reports a metadata read that found no path. qm answers 204 with an
+// empty body for a missing path; 404 means an unknown mount or route, and is
+// read as missing too, defensively.
+func absent(status int) bool {
+	return status == http.StatusNoContent || status == http.StatusNotFound
 }
 
 func (c *Client) check(tenantID string) error {

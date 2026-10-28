@@ -325,7 +325,7 @@ func TestPurgeTenant(t *testing.T) {
 	if fmt.Sprint(seq) != want {
 		t.Fatalf("requests = %v\nwant       %s", seq, want)
 	}
-	// Repeatable (qm says 404 for nothing to purge), and fine for a tenant
+	// Repeatable (qm says 204 for nothing to purge), and fine for a tenant
 	// with nothing stored.
 	if err := c.PurgeTenant(ctx, "abc"); err != nil {
 		t.Fatalf("second purge: %v", err)
@@ -349,6 +349,33 @@ func TestPurgeAcceptsOKAndNoContent(t *testing.T) {
 		})
 		if err := c.PurgeTenant(context.Background(), "t1"); err != nil {
 			t.Errorf("status %d: %v", status, err)
+		}
+	}
+}
+
+// qm answers a metadata read of a missing path with 204 and an empty body;
+// 404 (unknown mount or route) is read as missing too.
+func TestMissingPathReadsAsAbsent(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusNotFound} {
+		c, f, _ := setup(t)
+		ctx := context.Background()
+		if err := c.Put(ctx, "t1", creds); err != nil {
+			t.Fatal(err)
+		}
+		f.SetOverride(func(r qmfake.Request) (int, string, bool) {
+			switch r.Method {
+			case http.MethodDelete:
+				return http.StatusNoContent, "", true
+			case http.MethodGet:
+				return status, "", true
+			}
+			return 0, "", false
+		})
+		if v, err := c.Version(ctx, "t1"); err != nil || v != 0 {
+			t.Errorf("status %d: version = %d, %v; want 0, nil", status, v, err)
+		}
+		if err := c.PurgeTenant(ctx, "t1"); err != nil {
+			t.Errorf("status %d: purge: %v", status, err)
 		}
 	}
 }

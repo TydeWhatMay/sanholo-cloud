@@ -25,7 +25,8 @@ import (
 //	metadata: GET  <addr>/qm/v1/secret/metadata/<path>
 //	          -> {"current_version":N,"oldest_version":N,"created_time":..,
 //	              "updated_time":..,"versions":{"<n>":{..,"destroyed":bool}}}
-//	          404 when the path is not present. Never carries a value.
+//	          204 with an empty body when the path is not present (404
+//	          only for an unknown mount or route). Never carries a value.
 //	health:   GET  <addr>/qm/v1/sys/health   (no auth; always 200)
 //	          -> {"initialized":bool,"sealed":bool}
 //
@@ -42,7 +43,8 @@ import (
 //	                  this package does not call it)
 //	purge a prefix:   DELETE <addr>/qm/v1/secret/purge/<prefix>
 //	                  (a whole tenant prefix in one audited operation)
-//	                  -> 200 or 204
+//	                  -> {"paths_purged":N} (flat), or 204 when nothing
+//	                  existed; a version parameter is refused (400)
 //
 // The error body shape is not in the contract. errorCode accepts the
 // likely ones ({"code":..}, {"error":{"code":..}}, {"error":".."}).

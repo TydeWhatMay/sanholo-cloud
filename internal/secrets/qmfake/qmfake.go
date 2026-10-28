@@ -318,7 +318,8 @@ func (f *Fake) put(w http.ResponseWriter, path string, body []byte) {
 func (f *Fake) metadata(w http.ResponseWriter, path string) {
 	e := f.secrets[path]
 	if e == nil {
-		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"not found"}}`)
+		// Real qm answers an empty engine reply, here a missing path, with 204.
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	m := map[string]any{}
